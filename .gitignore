@@ -5,7 +5,6 @@
 *.slo
 *.lo
 *.o
-*.obj
 
 # Precompiled Headers
 *.gch
@@ -21,6 +20,7 @@
 *.so
 *.dylib
 *.dll
+*.xpl
 
 # Fortran module files
 *.mod
@@ -39,3 +39,11 @@
 
 # debug information files
 *.dwo
+
+# Build directories
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
