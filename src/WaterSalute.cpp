@@ -149,13 +149,13 @@ XPLM_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     g_drLocalY = XPLMFindDataRef("sim/flightmodel/position/local_y");
     g_drLocalZ = XPLMFindDataRef("sim/flightmodel/position/local_z");
     g_drHeading = XPLMFindDataRef("sim/flightmodel/position/psi");
-    g_drWingspan = XPLMFindDataRef("sim/aircraft/view/acf_livery_path"); /* Note: wingspan dataref varies */
     
-    /* Try to find actual wingspan dataref - use a default if not available */
-    XPLMDataRef wingspanRef = XPLMFindDataRef("sim/aircraft/parts/acf_wing_span");
-    if (wingspanRef) {
-        g_drWingspan = wingspanRef;
+    /* Find wingspan dataref - try several possible datarefs */
+    g_drWingspan = XPLMFindDataRef("sim/aircraft/parts/acf_wing_span");
+    if (!g_drWingspan) {
+        g_drWingspan = XPLMFindDataRef("sim/aircraft/view/acf_wing_span");
     }
+    /* Note: If wingspan dataref not found, a default value of 30m is used in StartWaterSalute */
     
     /* Create terrain probe */
     g_terrainProbe = XPLMCreateProbe(xplm_ProbeY);
@@ -292,7 +292,8 @@ static void MenuHandler(void* inMenuRef, void* inItemRef) {
  */
 static void UpdateMenuState() {
     bool canStart = (g_state == STATE_IDLE);
-    bool canStop = (g_state == STATE_WATER_SPRAYING);
+    /* Allow stopping during any active state (approaching, positioning, or spraying) */
+    bool canStop = (g_state != STATE_IDLE && g_state != STATE_TRUCKS_LEAVING);
     
     XPLMEnableMenuItem(g_menuId, g_menuStartItem, canStart ? 1 : 0);
     XPLMEnableMenuItem(g_menuId, g_menuStopItem, canStop ? 1 : 0);
