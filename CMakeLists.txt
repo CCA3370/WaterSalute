@@ -94,13 +94,15 @@ set_target_properties(WaterSalute PROPERTIES
 )
 
 # For multi-config generators (e.g. Visual Studio), ensure output goes directly to WaterSalute/
-foreach(config ${CMAKE_CONFIGURATION_TYPES})
-    string(TOUPPER ${config} config_upper)
-    set_target_properties(WaterSalute PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/WaterSalute"
-        RUNTIME_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/WaterSalute"
-    )
-endforeach()
+if(CMAKE_CONFIGURATION_TYPES)
+    foreach(config ${CMAKE_CONFIGURATION_TYPES})
+        string(TOUPPER ${config} config_upper)
+        set_target_properties(WaterSalute PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/WaterSalute"
+            RUNTIME_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/WaterSalute"
+        )
+    endforeach()
+endif()
 
 # Copy resources to build directory
 add_custom_command(TARGET WaterSalute POST_BUILD
