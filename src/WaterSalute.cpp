@@ -43,7 +43,9 @@ static const float FEET_TO_METERS = 0.3048f;       /* Feet to meters conversion 
 static const float MAX_GROUND_SPEED_KNOTS = 40.0f; /* Maximum ground speed for water salute */
 static const float TRUCK_APPROACH_SPEED = 15.0f;   /* Fire truck approach speed in m/s */
 static const float TRUCK_TURN_IN_PLACE_SPEED = 2.0f; /* Speed for turning in place (m/s) */
-static const float TRUCK_LEAVING_SPEED_MULT = 2.0f;  /* Speed multiplier when leaving */
+static const float TRUCK_LEAVING_SPEED_MULT = 0.667f;  /* Speed multiplier when leaving (2/3 of approach speed) */
+static const float TRUCK_ACCELERATION = 3.0f;      /* Truck acceleration in m/s^2 for smooth speed transitions */
+static const float TRUCK_DECELERATION = 4.0f;      /* Truck deceleration in m/s^2 for smooth braking */
 static const float TRUCK_LEAVING_DISTANCE = 600.0f;  /* Distance from aircraft to complete leaving (meters) */
 static const float TRUCK_STOP_DISTANCE = 200.0f;   /* Distance in front of aircraft to stop (meters) */
 static const float TRUCK_EXTRA_SPACING = 40.0f;    /* Extra spacing beyond wingspan (meters) */
@@ -55,7 +57,7 @@ static const int   NUM_PARTICLES_PER_JET = 200;    /* Number of particles per wa
 static const float PARTICLE_EMIT_RATE = 0.015f;    /* Time between particle emissions (faster for continuous stream) */
 static const float PARTICLE_DRAG = 0.15f;          /* Air drag coefficient for particles */
 static const float PARTICLE_TURBULENCE = 0.02f;    /* Turbulence amount for particle movement */
-static const XPLMDrawingPhase WATER_DRAWING_PHASE = xplm_Phase_Modern3D; /* Drawing phase for water particles */
+static const XPLMDrawingPhase WATER_DRAWING_PHASE = xplm_Phase_Modern3D; /* Drawing phase for water particles - use Modern3D for proper depth handling */
 
 /* Wingspan validation constants */
 static const float MIN_SEMISPAN_METERS = 2.5f;     /* Minimum semispan (half wingspan) in meters (small aircraft ~5m wingspan) */
@@ -113,6 +115,9 @@ struct FireTruck {
     float cannonPitch;       /* Water cannon pitch angle in degrees (0 to 90) */
     float cannonYaw;         /* Water cannon yaw angle in degrees (-180 to 180) */
     float speed;             /* Current speed in m/s */
+    float targetSpeed;       /* Target speed in m/s (for smooth acceleration/deceleration) */
+    bool isTurningBeforeLeave; /* Flag: true when truck is turning before leaving */
+    float leaveHeading;      /* Heading to use when leaving */
 };
 
 /* Global variables */
@@ -259,6 +264,31 @@ static float ClampSteeringAngle(float angle) {
     if (angle > MAX_STEERING_ANGLE) return MAX_STEERING_ANGLE;
     if (angle < -MAX_STEERING_ANGLE) return -MAX_STEERING_ANGLE;
     return angle;
+}
+
+/*
+ * UpdateSpeedSmooth - Smoothly transition current speed to target speed
+ * Uses acceleration for speeding up and deceleration for slowing down
+ * @param currentSpeed Current speed in m/s
+ * @param targetSpeed Target speed in m/s
+ * @param dt Delta time in seconds
+ * @return New current speed
+ */
+static float UpdateSpeedSmooth(float currentSpeed, float targetSpeed, float dt) {
+    if (currentSpeed < targetSpeed) {
+        /* Accelerating */
+        currentSpeed += TRUCK_ACCELERATION * dt;
+        if (currentSpeed > targetSpeed) {
+            currentSpeed = targetSpeed;
+        }
+    } else if (currentSpeed > targetSpeed) {
+        /* Decelerating */
+        currentSpeed -= TRUCK_DECELERATION * dt;
+        if (currentSpeed < targetSpeed) {
+            currentSpeed = targetSpeed;
+        }
+    }
+    return currentSpeed;
 }
 
 static char g_pluginPath[512];
@@ -1297,6 +1327,34 @@ static void StopWaterSalute() {
     
     if (g_state == STATE_WATER_SPRAYING) {
         UnregisterDrawCallback();
+        
+        /* Get aircraft heading to calculate leave direction */
+        float acHeading = g_drHeading ? XPLMGetDataf(g_drHeading) : 0.0f;
+        
+        /* Setup trucks to turn before leaving
+         * Trucks should turn to face away from the aircraft (back the way they came)
+         * Left truck turns to face back (opposite of its position heading toward center)
+         * Right truck turns to face back (opposite of its position heading toward center)
+         * 
+         * The trucks came from behind the aircraft, so they should leave by driving 
+         * back towards where they came from. The leave heading is the original approach
+         * direction (which was aircraft heading + 180, now we add another 180 to go back)
+         * This equals the aircraft heading direction (pointing where the aircraft is going)
+         */
+        
+        /* Left truck should turn to leave away from center - turn left */
+        g_leftTruck.isTurningBeforeLeave = true;
+        g_leftTruck.leaveHeading = NormalizeAngle360(acHeading - 45.0f); /* Turn left and leave */
+        g_leftTruck.targetSpeed = 0.0f; /* Start stopped, will accelerate */
+        
+        /* Right truck should turn to leave away from center - turn right */
+        g_rightTruck.isTurningBeforeLeave = true;
+        g_rightTruck.leaveHeading = NormalizeAngle360(acHeading + 45.0f); /* Turn right and leave */
+        g_rightTruck.targetSpeed = 0.0f;
+        
+        DebugLog("Left truck will turn to heading %.1f then leave", g_leftTruck.leaveHeading);
+        DebugLog("Right truck will turn to heading %.1f then leave", g_rightTruck.leaveHeading);
+        
         g_state = STATE_TRUCKS_LEAVING;
         DebugLog("Stopping water and trucks leaving");
     } else if (g_state != STATE_IDLE) {
@@ -1331,6 +1389,9 @@ static void InitializeTruck(FireTruck& truck) {
     truck.cannonPitch = DEFAULT_CANNON_PITCH;  /* Default pitch for water arc */
     truck.cannonYaw = 0.0f;     /* Default facing forward relative to truck */
     truck.speed = 0.0f;
+    truck.targetSpeed = 0.0f;   /* Target speed for smooth acceleration */
+    truck.isTurningBeforeLeave = false; /* Not turning yet */
+    truck.leaveHeading = 0.0f;  /* Will be set when leaving */
 }
 
 /*
@@ -1408,8 +1469,9 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
 static void UpdateTrucks(float dt) {
     auto updateTruckPosition = [dt](FireTruck& truck, bool& allPositioned) {
         if (truck.positioned) {
-            /* Truck is stationary */
-            truck.speed = 0.0f;
+            /* Truck is stationary - smoothly decelerate to stop */
+            truck.targetSpeed = 0.0f;
+            truck.speed = UpdateSpeedSmooth(truck.speed, truck.targetSpeed, dt);
             truck.frontSteeringAngle = 0.0f;
             truck.rearSteeringAngle = 0.0f;
             /* Wheel rotation angle stays at current value when stopped */
@@ -1450,8 +1512,19 @@ static void UpdateTrucks(float dt) {
              */
             truck.rearSteeringAngle = CalculateRearSteeringAngle(truck.frontSteeringAngle);
             
-            /* Set vehicle speed */
-            truck.speed = TRUCK_APPROACH_SPEED;
+            /* Set target speed based on distance - slow down when approaching target */
+            if (distance < 30.0f) {
+                /* Gradually reduce speed as we approach the target */
+                truck.targetSpeed = TRUCK_APPROACH_SPEED * (distance / 30.0f);
+                if (truck.targetSpeed < TRUCK_TURN_IN_PLACE_SPEED) {
+                    truck.targetSpeed = TRUCK_TURN_IN_PLACE_SPEED;
+                }
+            } else {
+                truck.targetSpeed = TRUCK_APPROACH_SPEED;
+            }
+            
+            /* Smoothly transition to target speed */
+            truck.speed = UpdateSpeedSmooth(truck.speed, truck.targetSpeed, dt);
             
             /* STEP 3: Calculate turning rate from front and rear wheel angles using Ackermann method */
             float turningRate = CalculateTurningRate(truck.speed, truck.frontSteeringAngle, truck.rearSteeringAngle);
@@ -1495,7 +1568,8 @@ static void UpdateTrucks(float dt) {
                 truck.rearSteeringAngle = CalculateRearSteeringAngle(truck.frontSteeringAngle);
                 
                 /* For turning in place, use a small speed to calculate turn rate */
-                truck.speed = TRUCK_TURN_IN_PLACE_SPEED;
+                truck.targetSpeed = TRUCK_TURN_IN_PLACE_SPEED;
+                truck.speed = UpdateSpeedSmooth(truck.speed, truck.targetSpeed, dt);
                 
                 /* STEP 3: Calculate and apply turning rate using Ackermann method */
                 float turningRate = CalculateTurningRate(truck.speed, truck.frontSteeringAngle, truck.rearSteeringAngle);
@@ -1507,7 +1581,8 @@ static void UpdateTrucks(float dt) {
             } else {
                 truck.heading = truck.targetHeading;
                 truck.positioned = true;
-                truck.speed = 0.0f;
+                truck.targetSpeed = 0.0f;
+                truck.speed = UpdateSpeedSmooth(truck.speed, truck.targetSpeed, dt);
                 truck.frontSteeringAngle = 0.0f;
                 truck.rearSteeringAngle = 0.0f;
             }
@@ -1528,28 +1603,62 @@ static void UpdateTrucks(float dt) {
     };
     
     auto updateTruckLeaving = [dt](FireTruck& truck) -> bool {
-        /* Drive straight when leaving - set steering angles to 0 */
-        truck.frontSteeringAngle = 0.0f;
-        truck.rearSteeringAngle = 0.0f;
-        
-        /* Set speed for leaving */
-        truck.speed = TRUCK_APPROACH_SPEED * TRUCK_LEAVING_SPEED_MULT;
-        
-        /* Heading remains constant when driving straight (no turning) */
-        
-        /* Move forward in the direction the truck is facing
-         * Using X-Plane coordinate system:
-         * - For heading θ: forward direction = (sin(θ), -cos(θ)) in (X, Z)
-         */
-        float headingRad = truck.heading * DEG_TO_RAD;
-        float moveDistance = truck.speed * dt;
-        
-        /* Update wheel rotation angle based on distance moved */
-        UpdateWheelRotationAngle(truck, moveDistance);
-        
-        truck.x += sinf(headingRad) * moveDistance;
-        truck.z += -cosf(headingRad) * moveDistance;
-        truck.y = GetTerrainHeight(static_cast<float>(truck.x), static_cast<float>(truck.z));
+        /* Phase 1: Turn before leaving */
+        if (truck.isTurningBeforeLeave) {
+            /* Calculate heading difference to leave heading */
+            float headingDiff = truck.leaveHeading - truck.heading;
+            while (headingDiff > 180.0f) headingDiff -= 360.0f;
+            while (headingDiff < -180.0f) headingDiff += 360.0f;
+            
+            if (fabsf(headingDiff) > 2.0f) {
+                /* Still turning - set steering angles */
+                truck.frontSteeringAngle = ClampSteeringAngle(headingDiff);
+                truck.rearSteeringAngle = CalculateRearSteeringAngle(truck.frontSteeringAngle);
+                
+                /* Turn slowly */
+                truck.targetSpeed = TRUCK_TURN_IN_PLACE_SPEED;
+                truck.speed = UpdateSpeedSmooth(truck.speed, truck.targetSpeed, dt);
+                
+                /* Calculate and apply turning rate */
+                float turningRate = CalculateTurningRate(truck.speed, truck.frontSteeringAngle, truck.rearSteeringAngle);
+                truck.heading += turningRate * dt;
+                while (truck.heading >= 360.0f) truck.heading -= 360.0f;
+                while (truck.heading < 0.0f) truck.heading += 360.0f;
+                
+                /* Update wheel rotation */
+                float moveDistance = truck.speed * dt;
+                UpdateWheelRotationAngle(truck, moveDistance);
+            } else {
+                /* Finished turning, start driving away */
+                truck.heading = truck.leaveHeading;
+                truck.isTurningBeforeLeave = false;
+                truck.frontSteeringAngle = 0.0f;
+                truck.rearSteeringAngle = 0.0f;
+                DebugLog("Truck finished turning, now driving away at heading %.1f", truck.heading);
+            }
+        } else {
+            /* Phase 2: Drive straight when leaving */
+            truck.frontSteeringAngle = 0.0f;
+            truck.rearSteeringAngle = 0.0f;
+            
+            /* Set target speed for leaving (2/3 of approach speed) */
+            truck.targetSpeed = TRUCK_APPROACH_SPEED * TRUCK_LEAVING_SPEED_MULT;
+            truck.speed = UpdateSpeedSmooth(truck.speed, truck.targetSpeed, dt);
+            
+            /* Move forward in the direction the truck is facing
+             * Using X-Plane coordinate system:
+             * - For heading θ: forward direction = (sin(θ), -cos(θ)) in (X, Z)
+             */
+            float headingRad = truck.heading * DEG_TO_RAD;
+            float moveDistance = truck.speed * dt;
+            
+            /* Update wheel rotation angle based on distance moved */
+            UpdateWheelRotationAngle(truck, moveDistance);
+            
+            truck.x += sinf(headingRad) * moveDistance;
+            truck.z += -cosf(headingRad) * moveDistance;
+            truck.y = GetTerrainHeight(static_cast<float>(truck.x), static_cast<float>(truck.z));
+        }
         
         /* Update instance position */
         if (truck.instance) {
