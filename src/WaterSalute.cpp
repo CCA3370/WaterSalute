@@ -30,6 +30,7 @@
 #include "XPLMMenus.h"
 #include "XPLMUtilities.h"
 #include "XPLMGraphics.h"
+#include "XPLMDisplay.h"
 #include "XPLMScenery.h"
 #include "XPLMInstance.h"
 
@@ -44,6 +45,7 @@ static const float WATER_JET_DURATION = 0.5f;      /* Time for particle to reach
 static const float PARTICLE_LIFETIME = 2.0f;       /* Particle lifetime in seconds */
 static const int   NUM_PARTICLES_PER_JET = 100;    /* Number of particles per water jet */
 static const float PARTICLE_EMIT_RATE = 0.02f;     /* Time between particle emissions (seconds) */
+static const XPLMDrawingPhase WATER_DRAWING_PHASE = xplm_Phase_Modern3D; /* Drawing phase for water particles */
 
 /* Plugin state */
 enum PluginState {
@@ -91,6 +93,8 @@ static XPLMProbeRef g_terrainProbe = nullptr;
 
 static XPLMFlightLoopID g_flightLoopId = nullptr;
 
+static bool g_drawCallbackRegistered = false;
+
 /* Datarefs */
 static XPLMDataRef g_drOnGround = nullptr;
 static XPLMDataRef g_drGroundSpeed = nullptr;
@@ -115,6 +119,9 @@ static float GetTerrainHeight(float x, float z);
 static void InitializeTruck(FireTruck& truck);
 static void CleanupTruck(FireTruck& truck);
 static bool LoadFireTruckModel();
+static int DrawWaterParticles(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon);
+static void RegisterDrawCallback();
+static void UnregisterDrawCallback();
 
 /* Debug logging */
 static void DebugLog(const char* format, ...) {
@@ -137,8 +144,12 @@ XPLM_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     strcpy(outSig, "com.xplane.watersalute");
     strcpy(outDesc, "Water salute ceremony with fire trucks");
     
-    /* Get plugin path */
-    XPLMGetPluginDirectoryPath(g_pluginPath);
+    /* Get plugin path using XPLMGetPluginInfo */
+    XPLMGetPluginInfo(XPLMGetMyID(), nullptr, g_pluginPath, nullptr, nullptr);
+    /* Extract directory path from full file path */
+    char* lastSlash = strrchr(g_pluginPath, '/');
+    if (!lastSlash) lastSlash = strrchr(g_pluginPath, '\\');
+    if (lastSlash) *lastSlash = '\0';
     
     DebugLog("Plugin starting...");
     
@@ -194,6 +205,8 @@ XPLM_API void XPluginStop(void) {
     DebugLog("Plugin stopping...");
     
     /* Cleanup */
+    UnregisterDrawCallback();
+    
     if (g_flightLoopId) {
         XPLMDestroyFlightLoop(g_flightLoopId);
         g_flightLoopId = nullptr;
@@ -424,12 +437,14 @@ static void StopWaterSalute() {
     DebugLog("StopWaterSalute called, current state: %d", g_state);
     
     if (g_state == STATE_WATER_SPRAYING) {
+        UnregisterDrawCallback();
         g_state = STATE_TRUCKS_LEAVING;
         DebugLog("Stopping water and trucks leaving");
     } else if (g_state != STATE_IDLE) {
         /* Immediate cleanup for other states */
         CleanupTruck(g_leftTruck);
         CleanupTruck(g_rightTruck);
+        UnregisterDrawCallback();
         g_state = STATE_IDLE;
         DebugLog("Water salute cancelled");
     }
@@ -618,6 +633,7 @@ static void UpdateTrucks(float dt) {
             
             if (g_leftTruck.positioned && g_rightTruck.positioned) {
                 g_state = STATE_WATER_SPRAYING;
+                RegisterDrawCallback();
                 UpdateMenuState();
                 DebugLog("Trucks positioned, starting water spray");
             } else if (g_state == STATE_TRUCKS_APPROACHING) {
@@ -643,6 +659,7 @@ static void UpdateTrucks(float dt) {
             if (leftGone && rightGone) {
                 CleanupTruck(g_leftTruck);
                 CleanupTruck(g_rightTruck);
+                UnregisterDrawCallback();
                 g_state = STATE_IDLE;
                 UpdateMenuState();
                 DebugLog("Water salute complete");
@@ -760,9 +777,30 @@ static void EmitParticle(FireTruck& truck) {
     truck.particles.push_back(particle);
 }
 
+/*
+ * RegisterDrawCallback - Register the draw callback for water particles
+ */
+static void RegisterDrawCallback() {
+    if (!g_drawCallbackRegistered) {
+        XPLMRegisterDrawCallback(DrawWaterParticles, WATER_DRAWING_PHASE, 0, nullptr);
+        g_drawCallbackRegistered = true;
+        DebugLog("Draw callback registered");
+    }
+}
+
+/*
+ * UnregisterDrawCallback - Unregister the draw callback for water particles
+ */
+static void UnregisterDrawCallback() {
+    if (g_drawCallbackRegistered) {
+        XPLMUnregisterDrawCallback(DrawWaterParticles, WATER_DRAWING_PHASE, 0, nullptr);
+        g_drawCallbackRegistered = false;
+        DebugLog("Draw callback unregistered");
+    }
+}
+
 /* 
  * Draw callback for rendering water particles
- * This would be registered with XPLMRegisterDrawCallback for actual rendering
  */
 static int DrawWaterParticles(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon) {
     (void)inPhase;
