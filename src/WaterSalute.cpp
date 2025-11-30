@@ -44,6 +44,7 @@ static const float WATER_JET_DURATION = 0.5f;      /* Time for particle to reach
 static const float PARTICLE_LIFETIME = 2.0f;       /* Particle lifetime in seconds */
 static const int   NUM_PARTICLES_PER_JET = 100;    /* Number of particles per water jet */
 static const float PARTICLE_EMIT_RATE = 0.02f;     /* Time between particle emissions (seconds) */
+static const XPLMDrawingPhase WATER_DRAWING_PHASE = xplm_Phase_Modern3D; /* Drawing phase for water particles */
 
 /* Plugin state */
 enum PluginState {
@@ -776,7 +777,7 @@ static void EmitParticle(FireTruck& truck) {
  */
 static void RegisterDrawCallback() {
     if (!g_drawCallbackRegistered) {
-        XPLMRegisterDrawCallback(DrawWaterParticles, xplm_Phase_Modern3D, 0, nullptr);
+        XPLMRegisterDrawCallback(DrawWaterParticles, WATER_DRAWING_PHASE, 0, nullptr);
         g_drawCallbackRegistered = true;
         DebugLog("Draw callback registered");
     }
@@ -787,7 +788,7 @@ static void RegisterDrawCallback() {
  */
 static void UnregisterDrawCallback() {
     if (g_drawCallbackRegistered) {
-        XPLMUnregisterDrawCallback(DrawWaterParticles, xplm_Phase_Modern3D, 0, nullptr);
+        XPLMUnregisterDrawCallback(DrawWaterParticles, WATER_DRAWING_PHASE, 0, nullptr);
         g_drawCallbackRegistered = false;
         DebugLog("Draw callback unregistered");
     }
