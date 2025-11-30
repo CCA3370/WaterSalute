@@ -39,6 +39,9 @@
 static const float KNOTS_TO_MS = 0.514444f;        /* Knots to m/s conversion */
 static const float MAX_GROUND_SPEED_KNOTS = 40.0f; /* Maximum ground speed for water salute */
 static const float TRUCK_APPROACH_SPEED = 15.0f;   /* Fire truck approach speed in m/s */
+static const float TRUCK_TURN_IN_PLACE_SPEED = 2.0f; /* Speed for turning in place (m/s) */
+static const float TRUCK_LEAVING_SPEED_MULT = 2.0f;  /* Speed multiplier when leaving */
+static const float TRUCK_LEAVING_DISTANCE = 600.0f;  /* Distance from aircraft to complete leaving (meters) */
 static const float TRUCK_STOP_DISTANCE = 200.0f;   /* Distance in front of aircraft to stop (meters) */
 static const float TRUCK_EXTRA_SPACING = 40.0f;    /* Extra spacing beyond wingspan (meters) */
 static const float TRUCK_POSITIONING_THRESHOLD = 50.0f; /* Distance threshold to start positioning phase (meters) */
@@ -137,6 +140,7 @@ static XPLMDataRef g_drTruckSpeed = nullptr;               /* watersalute/truck/
 /* Wheel physics constants */
 static const float WHEEL_RADIUS = 0.5f;                 /* Wheel radius in meters */
 static const float MAX_STEERING_ANGLE = 45.0f;          /* Maximum steering angle in degrees */
+static const float WHEELBASE = 6.0f;                    /* Distance between front and rear axles in meters (for 8x8 truck) */
 static const float MIN_CANNON_PITCH = 0.0f;             /* Minimum cannon pitch angle */
 static const float MAX_CANNON_PITCH = 90.0f;            /* Maximum cannon pitch angle */
 static const float DEFAULT_CANNON_PITCH = 45.0f;        /* Default cannon pitch angle for water arc */
@@ -169,6 +173,48 @@ static void UpdateWheelRotationAngle(FireTruck& truck, float distanceMoved) {
         float angularDisplacementDeg = angularDisplacementRad * RAD_TO_DEG;
         truck.wheelRotationAngle = NormalizeAngle360(truck.wheelRotationAngle + angularDisplacementDeg);
     }
+}
+
+/*
+ * CalculateTurningRate - Calculate vehicle turning rate from front wheel steering angle
+ * Uses the bicycle model: turning_rate = (speed * tan(steer_angle)) / wheelbase
+ * @param speed Vehicle speed in m/s
+ * @param frontSteerAngleDeg Front wheel steering angle in degrees (-45 to 45)
+ * @return Turning rate in degrees per second
+ */
+static float CalculateTurningRate(float speed, float frontSteerAngleDeg) {
+    if (fabsf(speed) < 0.01f || fabsf(frontSteerAngleDeg) < 0.1f) {
+        return 0.0f;
+    }
+    float frontSteerAngleRad = frontSteerAngleDeg * DEG_TO_RAD;
+    /* Turning rate in rad/s = (speed * tan(steer_angle)) / wheelbase */
+    float turningRateRad = (speed * tanf(frontSteerAngleRad)) / WHEELBASE;
+    return turningRateRad * RAD_TO_DEG;
+}
+
+/*
+ * CalculateRearSteeringAngle - Calculate rear axle steering angle from front axle angle
+ * Rear axle uses counter-steering (opposite direction) for better maneuverability
+ * @param frontSteerAngle Front wheel steering angle in degrees
+ * @return Rear axle steering angle in degrees (clamped to ±MAX_STEERING_ANGLE)
+ */
+static float CalculateRearSteeringAngle(float frontSteerAngle) {
+    /* Rear axle counter-steers: opposite direction at REAR_STEER_RATIO */
+    float rearAngle = -frontSteerAngle * REAR_STEER_RATIO;
+    if (rearAngle > MAX_STEERING_ANGLE) rearAngle = MAX_STEERING_ANGLE;
+    if (rearAngle < -MAX_STEERING_ANGLE) rearAngle = -MAX_STEERING_ANGLE;
+    return rearAngle;
+}
+
+/*
+ * ClampSteeringAngle - Clamp steering angle to valid range (-45 to 45 degrees)
+ * @param angle Steering angle in degrees
+ * @return Clamped steering angle
+ */
+static float ClampSteeringAngle(float angle) {
+    if (angle > MAX_STEERING_ANGLE) return MAX_STEERING_ANGLE;
+    if (angle < -MAX_STEERING_ANGLE) return -MAX_STEERING_ANGLE;
+    return angle;
 }
 
 static char g_pluginPath[512];
@@ -1225,101 +1271,89 @@ static void UpdateTrucks(float dt) {
             return;
         }
         
-        /* Calculate distance to target */
+        /* Calculate distance and direction to target */
         float dx = truck.targetX - static_cast<float>(truck.x);
         float dz = truck.targetZ - static_cast<float>(truck.z);
         float distance = sqrtf(dx * dx + dz * dz);
         
         if (distance > 2.0f) {
-            /* Move toward target */
-            float moveSpeed = TRUCK_APPROACH_SPEED;
-            float moveDistance = moveSpeed * dt;
-            if (moveDistance > distance) moveDistance = distance;
-            
+            /* Calculate desired heading to target */
             float dirX = dx / distance;
             float dirZ = dz / distance;
-            
-            /* Store previous position for speed calculation */
-            double prevX = truck.x;
-            double prevZ = truck.z;
-            
-            truck.x += dirX * moveDistance;
-            truck.z += dirZ * moveDistance;
-            truck.y = GetTerrainHeight(static_cast<float>(truck.x), static_cast<float>(truck.z));
-            
-            /* Calculate actual speed based on distance moved */
-            float actualDx = static_cast<float>(truck.x - prevX);
-            float actualDz = static_cast<float>(truck.z - prevZ);
-            float actualDistance = sqrtf(actualDx * actualDx + actualDz * actualDz);
-            truck.speed = (dt > 0.0f) ? (actualDistance / dt) : 0.0f;
-            
-            /* Update wheel rotation angle based on distance moved */
-            UpdateWheelRotationAngle(truck, actualDistance);
-            
-            /* Calculate desired heading */
             float desiredHeading = atan2f(-dirX, -dirZ) * RAD_TO_DEG;
+            
+            /* Calculate heading difference */
             float headingDiff = desiredHeading - truck.heading;
             while (headingDiff > 180.0f) headingDiff -= 360.0f;
             while (headingDiff < -180.0f) headingDiff += 360.0f;
             
-            /* Calculate steering angles for 8x8 truck with counter-steering rear axle
-             * Front axles (first two bogies): turn in the direction of the turn
-             * Rear axle: counter-steer (turn opposite direction) for better maneuverability
-             * 
-             * Sign convention:
-             * - headingDiff < 0: turning left (counter-clockwise)
-             * - headingDiff > 0: turning right (clockwise)
-             * 
-             * For left turn (headingDiff < 0):
-             * - Front axles: negative angle (wheels turn left)
-             * - Rear axle: positive angle (wheels turn right, counter-steer)
-             * 
-             * For right turn (headingDiff > 0):
-             * - Front axles: positive angle (wheels turn right)
-             * - Rear axle: negative angle (wheels turn left, counter-steer)
+            /* STEP 1: Set front wheel steering angle based on heading difference
+             * The front wheel angle is the primary control (within ±45 degrees)
+             * - Negative angle: turning left
+             * - Positive angle: turning right
              */
+            truck.frontSteeringAngle = ClampSteeringAngle(headingDiff);
             
-            /* Front axles steering angle (same direction as turn) */
-            truck.frontSteeringAngle = headingDiff;
-            if (truck.frontSteeringAngle > MAX_STEERING_ANGLE) truck.frontSteeringAngle = MAX_STEERING_ANGLE;
-            if (truck.frontSteeringAngle < -MAX_STEERING_ANGLE) truck.frontSteeringAngle = -MAX_STEERING_ANGLE;
+            /* STEP 2: Calculate rear wheel angle from front wheel angle
+             * Rear axle uses counter-steering (opposite direction)
+             */
+            truck.rearSteeringAngle = CalculateRearSteeringAngle(truck.frontSteeringAngle);
             
-            /* Rear axle steering angle (opposite direction for counter-steering) */
-            truck.rearSteeringAngle = -headingDiff * REAR_STEER_RATIO;
-            if (truck.rearSteeringAngle > MAX_STEERING_ANGLE) truck.rearSteeringAngle = MAX_STEERING_ANGLE;
-            if (truck.rearSteeringAngle < -MAX_STEERING_ANGLE) truck.rearSteeringAngle = -MAX_STEERING_ANGLE;
+            /* Set vehicle speed */
+            truck.speed = TRUCK_APPROACH_SPEED;
             
-            /* Update heading to face movement direction */
-            truck.heading = desiredHeading;
+            /* STEP 3: Calculate turning rate from front wheel angle and speed */
+            float turningRate = CalculateTurningRate(truck.speed, truck.frontSteeringAngle);
+            
+            /* STEP 4: Update heading based on turning rate */
+            truck.heading += turningRate * dt;
+            /* Normalize heading to 0-360 range */
+            while (truck.heading >= 360.0f) truck.heading -= 360.0f;
+            while (truck.heading < 0.0f) truck.heading += 360.0f;
+            
+            /* Move truck in the direction it's facing */
+            float headingRad = truck.heading * DEG_TO_RAD;
+            float moveDistance = truck.speed * dt;
+            if (moveDistance > distance) moveDistance = distance;
+            
+            /* Update position based on current heading (not target direction) */
+            truck.x += -sinf(headingRad) * moveDistance;
+            truck.z += -cosf(headingRad) * moveDistance;
+            truck.y = GetTerrainHeight(static_cast<float>(truck.x), static_cast<float>(truck.z));
+            
+            /* Update wheel rotation angle based on distance moved */
+            UpdateWheelRotationAngle(truck, moveDistance);
             
             allPositioned = false;
         } else {
             /* Reached position, now turn to face target heading */
-            truck.speed = 0.0f;
-            /* Keep wheel angle at current position when stopped */
-            
             float headingDiff = truck.targetHeading - truck.heading;
             while (headingDiff > 180.0f) headingDiff -= 360.0f;
             while (headingDiff < -180.0f) headingDiff += 360.0f;
             
             if (fabsf(headingDiff) > 1.0f) {
-                float turnRate = 45.0f * dt; /* degrees per second */
+                /* STEP 1: Set front wheel steering angle for turning in place
+                 * Use a proportional approach with some minimum angle
+                 */
+                truck.frontSteeringAngle = ClampSteeringAngle(headingDiff);
                 
-                /* Calculate steering angles for turning in place */
-                /* Front axles: full steering in turn direction */
-                truck.frontSteeringAngle = (headingDiff > 0) ? MAX_STEERING_ANGLE : -MAX_STEERING_ANGLE;
-                /* Rear axle: counter-steer (opposite direction) */
-                truck.rearSteeringAngle = (headingDiff > 0) ? -MAX_STEERING_ANGLE : MAX_STEERING_ANGLE;
+                /* STEP 2: Calculate rear wheel angle */
+                truck.rearSteeringAngle = CalculateRearSteeringAngle(truck.frontSteeringAngle);
                 
-                if (headingDiff > 0) {
-                    truck.heading += fminf(turnRate, headingDiff);
-                } else {
-                    truck.heading -= fminf(turnRate, -headingDiff);
-                }
+                /* For turning in place, use a small speed to calculate turn rate */
+                truck.speed = TRUCK_TURN_IN_PLACE_SPEED;
+                
+                /* STEP 3: Calculate and apply turning rate */
+                float turningRate = CalculateTurningRate(truck.speed, truck.frontSteeringAngle);
+                truck.heading += turningRate * dt;
+                while (truck.heading >= 360.0f) truck.heading -= 360.0f;
+                while (truck.heading < 0.0f) truck.heading += 360.0f;
+                
                 allPositioned = false;
             } else {
                 truck.heading = truck.targetHeading;
                 truck.positioned = true;
+                truck.speed = 0.0f;
                 truck.frontSteeringAngle = 0.0f;
                 truck.rearSteeringAngle = 0.0f;
             }
@@ -1340,28 +1374,32 @@ static void UpdateTrucks(float dt) {
     };
     
     auto updateTruckLeaving = [dt](FireTruck& truck) -> bool {
-        /* Move away from current position */
-        float headingRad = truck.heading * DEG_TO_RAD;
-        float dirX = -sinf(headingRad);
-        float dirZ = -cosf(headingRad);
-        
-        /* First turn around - turning right (positive heading change) */
-        truck.heading += 90.0f * dt;
-        /* Front axles: positive steering for right turn */
+        /* STEP 1: Set front wheel steering angle for turning right (positive angle) */
         truck.frontSteeringAngle = MAX_STEERING_ANGLE;
-        /* Rear axle: negative steering for counter-steer during right turn */
-        truck.rearSteeringAngle = -MAX_STEERING_ANGLE * REAR_STEER_RATIO;
         
-        /* Then move forward */
-        float moveSpeed = TRUCK_APPROACH_SPEED * 2.0f;
-        float moveDistance = moveSpeed * dt;
-        truck.speed = moveSpeed;
+        /* STEP 2: Calculate rear wheel angle from front wheel angle */
+        truck.rearSteeringAngle = CalculateRearSteeringAngle(truck.frontSteeringAngle);
+        
+        /* Set speed for leaving */
+        truck.speed = TRUCK_APPROACH_SPEED * TRUCK_LEAVING_SPEED_MULT;
+        
+        /* STEP 3: Calculate turning rate from front wheel angle and speed */
+        float turningRate = CalculateTurningRate(truck.speed, truck.frontSteeringAngle);
+        
+        /* STEP 4: Update heading based on turning rate */
+        truck.heading += turningRate * dt;
+        while (truck.heading >= 360.0f) truck.heading -= 360.0f;
+        while (truck.heading < 0.0f) truck.heading += 360.0f;
+        
+        /* Move forward in the direction the truck is facing */
+        float headingRad = truck.heading * DEG_TO_RAD;
+        float moveDistance = truck.speed * dt;
         
         /* Update wheel rotation angle based on distance moved */
         UpdateWheelRotationAngle(truck, moveDistance);
         
-        truck.x += dirX * moveDistance;
-        truck.z += dirZ * moveDistance;
+        truck.x += -sinf(headingRad) * moveDistance;
+        truck.z += -cosf(headingRad) * moveDistance;
         truck.y = GetTerrainHeight(static_cast<float>(truck.x), static_cast<float>(truck.z));
         
         /* Update instance position */
@@ -1377,14 +1415,14 @@ static void UpdateTrucks(float dt) {
             XPLMInstanceSetPosition(truck.instance, &drawInfo, nullptr);
         }
         
-        /* Check if far enough away (300 meters from start) */
+        /* Check if far enough away from aircraft */
         double acX = g_drLocalX ? XPLMGetDatad(g_drLocalX) : 0.0;
         double acZ = g_drLocalZ ? XPLMGetDatad(g_drLocalZ) : 0.0;
         float distDx = static_cast<float>(truck.x - acX);
         float distDz = static_cast<float>(truck.z - acZ);
         float distFromAircraft = sqrtf(distDx * distDx + distDz * distDz);
         
-        return distFromAircraft > 600.0f;
+        return distFromAircraft > TRUCK_LEAVING_DISTANCE;
     };
     
     switch (g_state) {
