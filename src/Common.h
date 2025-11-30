@@ -68,6 +68,8 @@ static const float RAINDROP_EFFECT_MAX = 0.8f;         /* Maximum rain effect in
 static const float RAINDROP_FADE_IN_TIME = 0.5f;       /* Time to fade in rain effect (seconds) */
 static const float RAINDROP_FADE_OUT_TIME = 2.0f;      /* Time to fade out rain effect (seconds) */
 static const float RAINDROP_UPDATE_INTERVAL = 0.1f;    /* Interval to update raindrop detection (seconds) */
+static const int   RAINDROP_TRUCK_COUNT = 2;           /* Number of trucks for particle ratio calculation */
+static const float RAINDROP_INTENSITY_MULTIPLIER = 2.0f; /* Multiplier to boost intensity for visual effect */
 
 /* Wingspan validation constants */
 static const float MIN_SEMISPAN_METERS = 2.5f;     /* Minimum semispan (half wingspan) in meters */

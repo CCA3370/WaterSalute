@@ -535,10 +535,13 @@ void UpdateRaindropEffect(float dt, double acX, double acY, double acZ) {
         /* Count nearby particles */
         int nearbyParticles = CountNearbyParticles(acX, acY, acZ);
         
-        /* Calculate target intensity based on particle count */
-        /* More particles = stronger rain effect */
-        float particleRatio = static_cast<float>(nearbyParticles) / static_cast<float>(NUM_PARTICLES_PER_JET * 2);
-        g_targetRaindropIntensity = fminf(particleRatio * 2.0f, RAINDROP_EFFECT_MAX);
+        /* Calculate target intensity based on particle count
+         * The ratio is based on expected max particles from both trucks.
+         * The multiplier boosts the intensity for better visual effect since
+         * aircraft often only partially intersects the water spray area. */
+        int maxParticles = NUM_PARTICLES_PER_JET * RAINDROP_TRUCK_COUNT;
+        float particleRatio = static_cast<float>(nearbyParticles) / static_cast<float>(maxParticles);
+        g_targetRaindropIntensity = fminf(particleRatio * RAINDROP_INTENSITY_MULTIPLIER, RAINDROP_EFFECT_MAX);
         
         if (nearbyParticles > 0 && !g_raindropEffectActive) {
             DebugLog("Aircraft entering water spray - %d particles nearby", nearbyParticles);
