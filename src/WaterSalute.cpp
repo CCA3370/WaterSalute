@@ -43,9 +43,11 @@ static const float FEET_TO_METERS = 0.3048f;       /* Feet to meters conversion 
 static const float MAX_GROUND_SPEED_KNOTS = 40.0f; /* Maximum ground speed for water salute */
 static const float TRUCK_APPROACH_SPEED = 15.0f;   /* Fire truck approach speed in m/s */
 static const float TRUCK_TURN_IN_PLACE_SPEED = 2.0f; /* Speed for turning in place (m/s) */
-static const float TRUCK_LEAVING_SPEED_MULT = 0.667f;  /* Speed multiplier when leaving (2/3 of approach speed) */
+static const float TRUCK_LEAVING_SPEED_MULT = 2.0f / 3.0f;  /* Speed multiplier when leaving (2/3 of approach speed) */
 static const float TRUCK_ACCELERATION = 3.0f;      /* Truck acceleration in m/s^2 for smooth speed transitions */
 static const float TRUCK_DECELERATION = 4.0f;      /* Truck deceleration in m/s^2 for smooth braking */
+static const float TRUCK_SLOWDOWN_DISTANCE = 30.0f; /* Distance at which truck starts slowing down (meters) */
+static const float HEADING_TOLERANCE_DEG = 2.0f;   /* Tolerance for heading alignment (degrees) */
 static const float TRUCK_LEAVING_DISTANCE = 600.0f;  /* Distance from aircraft to complete leaving (meters) */
 static const float TRUCK_STOP_DISTANCE = 200.0f;   /* Distance in front of aircraft to stop (meters) */
 static const float TRUCK_EXTRA_SPACING = 40.0f;    /* Extra spacing beyond wingspan (meters) */
@@ -1513,9 +1515,9 @@ static void UpdateTrucks(float dt) {
             truck.rearSteeringAngle = CalculateRearSteeringAngle(truck.frontSteeringAngle);
             
             /* Set target speed based on distance - slow down when approaching target */
-            if (distance < 30.0f) {
+            if (distance < TRUCK_SLOWDOWN_DISTANCE) {
                 /* Gradually reduce speed as we approach the target */
-                truck.targetSpeed = TRUCK_APPROACH_SPEED * (distance / 30.0f);
+                truck.targetSpeed = TRUCK_APPROACH_SPEED * (distance / TRUCK_SLOWDOWN_DISTANCE);
                 if (truck.targetSpeed < TRUCK_TURN_IN_PLACE_SPEED) {
                     truck.targetSpeed = TRUCK_TURN_IN_PLACE_SPEED;
                 }
@@ -1610,7 +1612,7 @@ static void UpdateTrucks(float dt) {
             while (headingDiff > 180.0f) headingDiff -= 360.0f;
             while (headingDiff < -180.0f) headingDiff += 360.0f;
             
-            if (fabsf(headingDiff) > 2.0f) {
+            if (fabsf(headingDiff) > HEADING_TOLERANCE_DEG) {
                 /* Still turning - set steering angles */
                 truck.frontSteeringAngle = ClampSteeringAngle(headingDiff);
                 truck.rearSteeringAngle = CalculateRearSteeringAngle(truck.frontSteeringAngle);
