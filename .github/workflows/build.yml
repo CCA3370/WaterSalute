@@ -28,10 +28,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract SDK
-        run: |
-          unzip -o XPSDK420.zip -d .
-
       - name: Configure CMake (Unix)
         if: runner.os != 'Windows'
         run: |
