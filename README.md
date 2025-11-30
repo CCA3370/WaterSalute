@@ -67,7 +67,7 @@ mingw32-make
                ├── WaterSalute.xpl (or .dylib on macOS)
                └── resources/
                    ├── firetruck.obj  # X-Plane OBJ8 format
-                   └── firetruck.png  # Texture file
+                   └── Panther3.png   # Texture file
    ```
 
 ## Usage
