@@ -25,6 +25,12 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <map>
+#include <queue>
+#include <unordered_map>
+#include <sstream>
+#include <fstream>
+#include <limits>
 
 #include "XPLMDefs.h"
 #include "XPLMPlugin.h"
@@ -79,6 +85,84 @@ static const size_t DEBUG_BUFFER_SIZE = 1024;      /* Buffer size for debug mess
 static const size_t DEBUG_LOG_PREFIX_SIZE = 32;    /* Max size of log prefix "WaterSalute [VERBOSE]: " */
 static const size_t DEBUG_LOG_MSG_SIZE = DEBUG_BUFFER_SIZE + DEBUG_LOG_PREFIX_SIZE + 2; /* +2 for newline and null terminator */
 
+/* Road network constants */
+static const float ROAD_SEARCH_RADIUS = 5000.0f;   /* Maximum distance to search for roads (meters) */
+static const float PATH_NODE_DISTANCE = 30.0f;     /* Minimum distance between path nodes (meters) */
+static const float TRUCK_SPAWN_DISTANCE = 500.0f;  /* Distance from aircraft to spawn trucks (meters) */
+static const float TURN_ANTICIPATION = 15.0f;      /* Distance ahead to start turning for smooth path following */
+static const float MIN_TURN_RADIUS = 8.0f;         /* Minimum turning radius for 8x8 truck (meters) */
+static const float PATH_REACH_THRESHOLD = 5.0f;    /* Distance to consider a waypoint reached (meters) */
+static const float BEZIER_SMOOTHING_FACTOR = 0.25f; /* Control point distance as fraction of segment length */
+static const int MAX_PATH_NODES = 500;             /* Maximum number of nodes in a planned path */
+static const double EARTH_RADIUS_METERS = 6371000.0; /* Earth radius for lat/lon to meters conversion */
+
+/*
+ * Road Network Data Structures for apt.dat parsing
+ * 
+ * apt.dat format for ground routes:
+ * - 1201: Node (waypoint) - latitude longitude type name
+ * - 1202: Edge (basic taxiway connection) - node1 node2 direction surface
+ * - 1204: Edge (with runway info) - node1 node2 direction active_zone
+ * - 1206: Ground truck route edge - node1 node2 direction truck_types active_zone
+ */
+
+/* Road network node (from apt.dat 1201 records) */
+struct RoadNode {
+    std::string name;        /* Node identifier */
+    double lat;              /* Latitude in degrees */
+    double lon;              /* Longitude in degrees */
+    double x, z;             /* Local OpenGL coordinates (calculated) */
+    std::string nodeType;    /* "both", "dest", "junction" */
+    std::vector<size_t> connectedEdges; /* Indices into edge array */
+};
+
+/* Road network edge (from apt.dat 1202/1204/1206 records) */
+struct RoadEdge {
+    size_t node1Idx;         /* Index into nodes array */
+    size_t node2Idx;         /* Index into nodes array */
+    bool isOneWay;           /* True if edge is one-way */
+    bool isFireTruckRoute;   /* True if this edge allows fire trucks (1206) */
+    float length;            /* Edge length in meters (calculated) */
+    std::string surfaceType; /* "taxiway", "runway", "ramp", etc. */
+};
+
+/* Road network for an airport */
+struct RoadNetwork {
+    std::string airportId;   /* ICAO code */
+    double refLat, refLon;   /* Reference point for coordinate conversion */
+    std::vector<RoadNode> nodes;
+    std::vector<RoadEdge> edges;
+    std::unordered_map<std::string, size_t> nodeNameToIndex; /* Fast lookup */
+    bool isLoaded;
+};
+
+/* Path waypoint for truck navigation */
+struct PathWaypoint {
+    double x, z;             /* Local OpenGL coordinates */
+    float targetHeading;     /* Desired heading when reaching this point */
+    float speed;             /* Target speed at this waypoint */
+    bool isSmoothed;         /* Whether this waypoint has been Bezier-smoothed */
+};
+
+/* Planned route for a truck */
+struct PlannedRoute {
+    std::vector<PathWaypoint> waypoints;
+    size_t currentWaypointIndex;
+    bool isValid;
+    bool isCompleted;
+};
+
+/* A* pathfinding node */
+struct AStarNode {
+    size_t nodeIndex;
+    float gScore;            /* Cost from start to this node */
+    float fScore;            /* gScore + heuristic estimate to goal */
+    size_t parentIndex;      /* Parent node index for path reconstruction */
+    bool operator>(const AStarNode& other) const {
+        return fScore > other.fScore;
+    }
+};
+
 /* Plugin state */
 enum PluginState {
     STATE_IDLE,
@@ -120,6 +204,8 @@ struct FireTruck {
     float targetSpeed;       /* Target speed in m/s (for smooth acceleration/deceleration) */
     bool isTurningBeforeLeave; /* Flag: true when truck is turning before leaving */
     float leaveHeading;      /* Heading to use when leaving */
+    PlannedRoute route;      /* Planned path from road network */
+    bool useRoadNetwork;     /* Whether to follow road network or direct approach */
 };
 
 /* Global variables */
@@ -133,6 +219,9 @@ static XPLMObjectRef g_waterDropObject = nullptr;  /* Water droplet model for pa
 static FireTruck g_leftTruck;
 static FireTruck g_rightTruck;
 static XPLMProbeRef g_terrainProbe = nullptr;
+
+/* Road network for current airport */
+static RoadNetwork g_roadNetwork;
 
 static XPLMFlightLoopID g_flightLoopId = nullptr;
 
@@ -150,6 +239,8 @@ static XPLMDataRef g_drLocalY = nullptr;
 static XPLMDataRef g_drLocalZ = nullptr;
 static XPLMDataRef g_drHeading = nullptr;
 static XPLMDataRef g_drWingspan = nullptr;
+static XPLMDataRef g_drLatitude = nullptr;             /* Aircraft latitude in degrees */
+static XPLMDataRef g_drLongitude = nullptr;            /* Aircraft longitude in degrees */
 
 /* Custom datarefs published by this plugin */
 /* Fire truck control datarefs - left truck (index 0) and right truck (index 1) */
@@ -322,6 +413,16 @@ static void RegisterDrawCallback();
 static void UnregisterDrawCallback();
 static void RegisterCustomDataRefs();
 static void UnregisterCustomDataRefs();
+
+/* Road network forward declarations */
+static bool LoadAptDat(double acLat, double acLon);
+static void LatLonToLocal(double lat, double lon, double refLat, double refLon, double& x, double& z);
+static void LocalToLatLon(double x, double z, double refLat, double refLon, double& lat, double& lon);
+static size_t FindNearestNode(double x, double z, bool firetruckRoutesOnly);
+static bool FindPath(size_t startNode, size_t goalNode, std::vector<size_t>& path);
+static PlannedRoute PlanRouteToTarget(double startX, double startZ, double targetX, double targetZ, float targetHeading);
+static void SmoothPath(PlannedRoute& route);
+static void UpdateTruckFollowingPath(FireTruck& truck, float dt);
 
 /* Helper function to get truck by index (0 = left, 1 = right) */
 static FireTruck* GetTruckByIndex(int index) {
@@ -757,6 +858,8 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     g_drLocalY = XPLMFindDataRef("sim/flightmodel/position/local_y");
     g_drLocalZ = XPLMFindDataRef("sim/flightmodel/position/local_z");
     g_drHeading = XPLMFindDataRef("sim/flightmodel/position/psi");
+    g_drLatitude = XPLMFindDataRef("sim/flightmodel/position/latitude");
+    g_drLongitude = XPLMFindDataRef("sim/flightmodel/position/longitude");
     
     /* Find wingspan dataref - try several possible datarefs
      * 
@@ -1196,6 +1299,25 @@ static void StartWaterSalute() {
     DebugLog("Aircraft heading: %.1f degrees", acHeading);
     DebugLog("Aircraft wingspan: %.1f meters", wingspan);
     
+    /* Get aircraft latitude/longitude for road network loading */
+    double acLat = 0.0, acLon = 0.0;
+    if (g_drLatitude && g_drLongitude) {
+        acLat = XPLMGetDatad(g_drLatitude);
+        acLon = XPLMGetDatad(g_drLongitude);
+        DebugLog("Aircraft lat/lon: (%.6f, %.6f)", acLat, acLon);
+    }
+    
+    /* Try to load road network from apt.dat */
+    bool roadNetworkLoaded = false;
+    if (acLat != 0.0 || acLon != 0.0) {
+        roadNetworkLoaded = LoadAptDat(acLat, acLon);
+        if (roadNetworkLoaded) {
+            DebugLog("Road network loaded successfully for airport %s", g_roadNetwork.airportId.c_str());
+        } else {
+            DebugLog("Road network not available, using direct approach");
+        }
+    }
+    
     /* Calculate truck spacing (wingspan + 40 meters) */
     float truckSpacing = (wingspan / 2.0f) + (TRUCK_EXTRA_SPACING / 2.0f);
     DebugLog("Truck spacing from center: %.1f meters", truckSpacing);
@@ -1271,6 +1393,59 @@ static void StartWaterSalute() {
     DebugLog("  Start: (%.2f, %.2f, %.2f)", g_rightTruck.x, g_rightTruck.y, g_rightTruck.z);
     DebugLog("  Target: (%.2f, %.2f)", g_rightTruck.targetX, g_rightTruck.targetZ);
     DebugLog("  Heading: %.1f -> %.1f", g_rightTruck.heading, g_rightTruck.targetHeading);
+    
+    /* Plan routes for trucks if road network is available */
+    if (roadNetworkLoaded) {
+        /* Find spawn points on roads near the default start positions */
+        size_t leftSpawnNode = FindNearestNode(g_leftTruck.x, g_leftTruck.z, true);
+        size_t rightSpawnNode = FindNearestNode(g_rightTruck.x, g_rightTruck.z, true);
+        
+        if (leftSpawnNode != SIZE_MAX) {
+            const RoadNode& node = g_roadNetwork.nodes[leftSpawnNode];
+            g_leftTruck.x = node.x;
+            g_leftTruck.z = node.z;
+            g_leftTruck.y = GetTerrainHeight(static_cast<float>(node.x), static_cast<float>(node.z));
+            DebugLog("Left truck spawning on road node '%s' at (%.2f, %.2f)", 
+                     node.name.c_str(), node.x, node.z);
+        }
+        
+        if (rightSpawnNode != SIZE_MAX) {
+            const RoadNode& node = g_roadNetwork.nodes[rightSpawnNode];
+            g_rightTruck.x = node.x;
+            g_rightTruck.z = node.z;
+            g_rightTruck.y = GetTerrainHeight(static_cast<float>(node.x), static_cast<float>(node.z));
+            DebugLog("Right truck spawning on road node '%s' at (%.2f, %.2f)", 
+                     node.name.c_str(), node.x, node.z);
+        }
+        
+        /* Plan routes from spawn to target */
+        g_leftTruck.route = PlanRouteToTarget(g_leftTruck.x, g_leftTruck.z, 
+                                               g_leftTruck.targetX, g_leftTruck.targetZ,
+                                               g_leftTruck.targetHeading);
+        g_leftTruck.useRoadNetwork = g_leftTruck.route.isValid;
+        
+        g_rightTruck.route = PlanRouteToTarget(g_rightTruck.x, g_rightTruck.z,
+                                                g_rightTruck.targetX, g_rightTruck.targetZ,
+                                                g_rightTruck.targetHeading);
+        g_rightTruck.useRoadNetwork = g_rightTruck.route.isValid;
+        
+        DebugLog("Left truck route: %s (%zu waypoints)", 
+                 g_leftTruck.route.isValid ? "VALID" : "INVALID",
+                 g_leftTruck.route.waypoints.size());
+        DebugLog("Right truck route: %s (%zu waypoints)",
+                 g_rightTruck.route.isValid ? "VALID" : "INVALID",
+                 g_rightTruck.route.waypoints.size());
+        
+        /* Set initial heading based on first waypoint if route is valid */
+        if (g_leftTruck.route.isValid && g_leftTruck.route.waypoints.size() > 1) {
+            g_leftTruck.heading = g_leftTruck.route.waypoints[0].targetHeading;
+        }
+        if (g_rightTruck.route.isValid && g_rightTruck.route.waypoints.size() > 1) {
+            g_rightTruck.heading = g_rightTruck.route.waypoints[0].targetHeading;
+        }
+    } else {
+        DebugLog("No road network - trucks will use direct approach");
+    }
     
     /* Create truck instances if model loaded */
     if (g_truckObject) {
@@ -1394,6 +1569,12 @@ static void InitializeTruck(FireTruck& truck) {
     truck.targetSpeed = 0.0f;   /* Target speed for smooth acceleration */
     truck.isTurningBeforeLeave = false; /* Not turning yet */
     truck.leaveHeading = 0.0f;  /* Will be set when leaving */
+    /* Initialize route planning */
+    truck.route.waypoints.clear();
+    truck.route.currentWaypointIndex = 0;
+    truck.route.isValid = false;
+    truck.route.isCompleted = false;
+    truck.useRoadNetwork = false;
 }
 
 /*
@@ -1480,6 +1661,18 @@ static void UpdateTrucks(float dt) {
             return;
         }
         
+        /* Use road network path following if available */
+        if (truck.useRoadNetwork && truck.route.isValid && !truck.route.isCompleted) {
+            UpdateTruckFollowingPath(truck, dt);
+            if (truck.route.isCompleted) {
+                truck.positioned = true;
+            } else {
+                allPositioned = false;
+            }
+            return;
+        }
+        
+        /* Fallback: Direct approach to target (original behavior) */
         /* Calculate distance and direction to target */
         float dx = truck.targetX - static_cast<float>(truck.x);
         float dz = truck.targetZ - static_cast<float>(truck.z);
@@ -2043,4 +2236,824 @@ static int DrawWaterParticles(XPLMDrawingPhase inPhase, int inIsBefore, void* in
     }
     
     return 1;
+}
+
+/*
+ * ================================================================================
+ * Road Network and Path Planning Implementation
+ * ================================================================================
+ * 
+ * This section implements airport ground route parsing from apt.dat files,
+ * A* pathfinding for route planning, and Bezier curve smoothing for natural
+ * truck movement along planned paths.
+ */
+
+/*
+ * LatLonToLocal - Convert latitude/longitude to local OpenGL coordinates
+ * Uses simple equirectangular projection centered on reference point
+ * @param lat Latitude in degrees
+ * @param lon Longitude in degrees
+ * @param refLat Reference latitude (center point)
+ * @param refLon Reference longitude (center point)
+ * @param x Output X coordinate (meters, East positive)
+ * @param z Output Z coordinate (meters, South positive in X-Plane)
+ */
+static void LatLonToLocal(double lat, double lon, double refLat, double refLon, double& x, double& z) {
+    double latRad = refLat * DEG_TO_RAD;
+    /* X is East-West distance */
+    x = (lon - refLon) * DEG_TO_RAD * EARTH_RADIUS_METERS * cos(latRad);
+    /* Z in X-Plane is negative North, positive South */
+    z = -(lat - refLat) * DEG_TO_RAD * EARTH_RADIUS_METERS;
+}
+
+/*
+ * LocalToLatLon - Convert local OpenGL coordinates to latitude/longitude
+ * Inverse of LatLonToLocal
+ */
+static void LocalToLatLon(double x, double z, double refLat, double refLon, double& lat, double& lon) {
+    double latRad = refLat * DEG_TO_RAD;
+    lon = refLon + x / (EARTH_RADIUS_METERS * cos(latRad)) * RAD_TO_DEG;
+    lat = refLat - z / EARTH_RADIUS_METERS * RAD_TO_DEG;
+}
+
+/*
+ * ParseAptDatLine - Parse a single line from apt.dat
+ * @param line The line to parse
+ * @param tokens Output vector of space-separated tokens
+ */
+static void ParseAptDatLine(const std::string& line, std::vector<std::string>& tokens) {
+    tokens.clear();
+    std::istringstream iss(line);
+    std::string token;
+    while (iss >> token) {
+        tokens.push_back(token);
+    }
+}
+
+/*
+ * LoadAptDat - Load airport ground routes from apt.dat
+ * Searches for apt.dat in X-Plane's Resources/default scenery folder
+ * and loads the ground route network for the nearest airport
+ * 
+ * @param acLat Aircraft latitude in degrees
+ * @param acLon Aircraft longitude in degrees
+ * @return true if airport found and loaded successfully
+ */
+static bool LoadAptDat(double acLat, double acLon) {
+    DebugLog("LoadAptDat: Searching for airport near (%.6f, %.6f)", acLat, acLon);
+    
+    /* Reset road network */
+    g_roadNetwork.nodes.clear();
+    g_roadNetwork.edges.clear();
+    g_roadNetwork.nodeNameToIndex.clear();
+    g_roadNetwork.isLoaded = false;
+    
+    /* Get X-Plane system path */
+    char systemPath[512];
+    XPLMGetSystemPath(systemPath);
+    
+    /* Build path to apt.dat - try several common locations */
+    std::vector<std::string> aptDatPaths;
+    
+    /* Standard apt.dat location */
+    aptDatPaths.push_back(std::string(systemPath) + "Resources/default scenery/default apt dat/Earth nav data/apt.dat");
+    aptDatPaths.push_back(std::string(systemPath) + "Custom Scenery/Global Airports/Earth nav data/apt.dat");
+    aptDatPaths.push_back(std::string(systemPath) + "Resources/default data/apt.dat");
+    
+    std::ifstream aptFile;
+    std::string usedPath;
+    
+    for (const auto& path : aptDatPaths) {
+        aptFile.open(path);
+        if (aptFile.is_open()) {
+            usedPath = path;
+            DebugLog("LoadAptDat: Opened apt.dat at %s", path.c_str());
+            break;
+        }
+    }
+    
+    if (!aptFile.is_open()) {
+        DebugLog("LoadAptDat: Could not open any apt.dat file");
+        return false;
+    }
+    
+    /* Variables for parsing */
+    std::string line;
+    std::vector<std::string> tokens;
+    bool foundNearbyAirport = false;
+    bool inAirport = false;
+    bool inGroundNetwork = false;
+    double airportLat = 0.0, airportLon = 0.0;
+    std::string currentAirportId;
+    double bestDistance = ROAD_SEARCH_RADIUS;
+    std::string bestAirportId;
+    double bestAirportLat = 0.0, bestAirportLon = 0.0;
+    
+    /* Temporary storage for current airport's ground network */
+    std::vector<RoadNode> tempNodes;
+    std::vector<RoadEdge> tempEdges;
+    std::unordered_map<std::string, size_t> tempNodeNameToIndex;
+    
+    /* First pass: find the nearest airport */
+    while (std::getline(aptFile, line)) {
+        ParseAptDatLine(line, tokens);
+        if (tokens.empty()) continue;
+        
+        int rowCode = 0;
+        try {
+            rowCode = std::stoi(tokens[0]);
+        } catch (...) {
+            continue;
+        }
+        
+        /* Airport header (1 = land airport, 16 = seaplane base, 17 = heliport) */
+        if (rowCode == 1 || rowCode == 16 || rowCode == 17) {
+            /* Check if we were in an airport with ground network */
+            if (inAirport && inGroundNetwork && !tempNodes.empty()) {
+                /* Calculate distance to this airport */
+                double dx, dz;
+                LatLonToLocal(acLat, acLon, airportLat, airportLon, dx, dz);
+                double dist = sqrt(dx * dx + dz * dz);
+                if (dist < bestDistance) {
+                    bestDistance = dist;
+                    bestAirportId = currentAirportId;
+                    bestAirportLat = airportLat;
+                    bestAirportLon = airportLon;
+                    /* Save this airport's ground network */
+                    g_roadNetwork.nodes = tempNodes;
+                    g_roadNetwork.edges = tempEdges;
+                    g_roadNetwork.nodeNameToIndex = tempNodeNameToIndex;
+                    foundNearbyAirport = true;
+                }
+            }
+            
+            /* Reset for new airport */
+            inAirport = true;
+            inGroundNetwork = false;
+            tempNodes.clear();
+            tempEdges.clear();
+            tempNodeNameToIndex.clear();
+            
+            if (tokens.size() >= 5) {
+                currentAirportId = tokens[4];
+                /* Use first runway/taxiway coordinates as reference */
+                airportLat = acLat;  /* Will be updated when we find a node */
+                airportLon = acLon;
+            }
+        }
+        /* Taxi routing network header */
+        else if (rowCode == 1200) {
+            inGroundNetwork = true;
+        }
+        /* Taxi routing node (1201) */
+        else if (rowCode == 1201 && inGroundNetwork && tokens.size() >= 5) {
+            RoadNode node;
+            try {
+                node.lat = std::stod(tokens[1]);
+                node.lon = std::stod(tokens[2]);
+                /* Use first node as airport reference point if not set */
+                if (tempNodes.empty()) {
+                    airportLat = node.lat;
+                    airportLon = node.lon;
+                }
+            } catch (...) {
+                continue;
+            }
+            node.nodeType = tokens[3];
+            node.name = tokens[4];
+            /* For nodes with multi-word names, concatenate remaining tokens */
+            for (size_t i = 5; i < tokens.size(); ++i) {
+                node.name += "_" + tokens[i];
+            }
+            
+            tempNodeNameToIndex[node.name] = tempNodes.size();
+            tempNodes.push_back(node);
+        }
+        /* Taxi routing edge (1202) - basic taxiway connection */
+        else if (rowCode == 1202 && inGroundNetwork && tokens.size() >= 4) {
+            RoadEdge edge;
+            std::string node1Name = tokens[1];
+            std::string node2Name = tokens[2];
+            
+            auto it1 = tempNodeNameToIndex.find(node1Name);
+            auto it2 = tempNodeNameToIndex.find(node2Name);
+            if (it1 != tempNodeNameToIndex.end() && it2 != tempNodeNameToIndex.end()) {
+                edge.node1Idx = it1->second;
+                edge.node2Idx = it2->second;
+                edge.isOneWay = (tokens[3] == "oneway");
+                edge.isFireTruckRoute = true;  /* Assume taxiways can be used by fire trucks */
+                edge.surfaceType = (tokens.size() > 4) ? tokens[4] : "taxiway";
+                edge.length = 0.0f;  /* Will be calculated later */
+                
+                tempNodes[edge.node1Idx].connectedEdges.push_back(tempEdges.size());
+                if (!edge.isOneWay) {
+                    tempNodes[edge.node2Idx].connectedEdges.push_back(tempEdges.size());
+                }
+                tempEdges.push_back(edge);
+            }
+        }
+        /* Ground truck route edge (1206) - specific vehicle types */
+        else if (rowCode == 1206 && inGroundNetwork && tokens.size() >= 4) {
+            RoadEdge edge;
+            std::string node1Name = tokens[1];
+            std::string node2Name = tokens[2];
+            std::string direction = (tokens.size() > 3) ? tokens[3] : "twoway";
+            std::string truckTypes = (tokens.size() > 4) ? tokens[4] : "";
+            
+            auto it1 = tempNodeNameToIndex.find(node1Name);
+            auto it2 = tempNodeNameToIndex.find(node2Name);
+            if (it1 != tempNodeNameToIndex.end() && it2 != tempNodeNameToIndex.end()) {
+                edge.node1Idx = it1->second;
+                edge.node2Idx = it2->second;
+                edge.isOneWay = (direction == "oneway");
+                /* Check if fire_truck is allowed */
+                edge.isFireTruckRoute = (truckTypes.find("fire") != std::string::npos) ||
+                                        truckTypes.empty();  /* Empty means all trucks allowed */
+                edge.surfaceType = "service_road";
+                edge.length = 0.0f;
+                
+                tempNodes[edge.node1Idx].connectedEdges.push_back(tempEdges.size());
+                if (!edge.isOneWay) {
+                    tempNodes[edge.node2Idx].connectedEdges.push_back(tempEdges.size());
+                }
+                tempEdges.push_back(edge);
+            }
+        }
+    }
+    
+    /* Check final airport if any */
+    if (inAirport && inGroundNetwork && !tempNodes.empty()) {
+        double dx, dz;
+        LatLonToLocal(acLat, acLon, airportLat, airportLon, dx, dz);
+        double dist = sqrt(dx * dx + dz * dz);
+        if (dist < bestDistance) {
+            bestDistance = dist;
+            bestAirportId = currentAirportId;
+            bestAirportLat = airportLat;
+            bestAirportLon = airportLon;
+            g_roadNetwork.nodes = tempNodes;
+            g_roadNetwork.edges = tempEdges;
+            g_roadNetwork.nodeNameToIndex = tempNodeNameToIndex;
+            foundNearbyAirport = true;
+        }
+    }
+    
+    aptFile.close();
+    
+    if (!foundNearbyAirport) {
+        DebugLog("LoadAptDat: No nearby airport with ground routes found");
+        return false;
+    }
+    
+    /* Set up the road network */
+    g_roadNetwork.airportId = bestAirportId;
+    g_roadNetwork.refLat = bestAirportLat;
+    g_roadNetwork.refLon = bestAirportLon;
+    
+    /* Convert all node coordinates to local OpenGL coordinates using X-Plane's conversion */
+    for (auto& node : g_roadNetwork.nodes) {
+        double outY;
+        XPLMWorldToLocal(node.lat, node.lon, 0.0, &node.x, &outY, &node.z);
+    }
+    
+    /* Calculate edge lengths */
+    for (auto& edge : g_roadNetwork.edges) {
+        const RoadNode& n1 = g_roadNetwork.nodes[edge.node1Idx];
+        const RoadNode& n2 = g_roadNetwork.nodes[edge.node2Idx];
+        float dx = static_cast<float>(n2.x - n1.x);
+        float dz = static_cast<float>(n2.z - n1.z);
+        edge.length = sqrtf(dx * dx + dz * dz);
+    }
+    
+    g_roadNetwork.isLoaded = true;
+    
+    DebugLog("LoadAptDat: Loaded airport %s with %zu nodes and %zu edges",
+             bestAirportId.c_str(), g_roadNetwork.nodes.size(), g_roadNetwork.edges.size());
+    
+    return true;
+}
+
+/*
+ * FindNearestNode - Find the nearest road network node to a given position
+ * @param x Local X coordinate
+ * @param z Local Z coordinate
+ * @param firetruckRoutesOnly If true, only consider nodes connected to fire truck routes
+ * @return Index of nearest node, or SIZE_MAX if not found
+ */
+static size_t FindNearestNode(double x, double z, bool firetruckRoutesOnly) {
+    if (!g_roadNetwork.isLoaded || g_roadNetwork.nodes.empty()) {
+        return SIZE_MAX;
+    }
+    
+    size_t bestIndex = SIZE_MAX;
+    float bestDist = std::numeric_limits<float>::max();
+    
+    for (size_t i = 0; i < g_roadNetwork.nodes.size(); ++i) {
+        const RoadNode& node = g_roadNetwork.nodes[i];
+        
+        /* Check if node is connected to any fire truck routes */
+        if (firetruckRoutesOnly) {
+            bool hasFiretruckRoute = false;
+            for (size_t edgeIdx : node.connectedEdges) {
+                if (g_roadNetwork.edges[edgeIdx].isFireTruckRoute) {
+                    hasFiretruckRoute = true;
+                    break;
+                }
+            }
+            if (!hasFiretruckRoute) continue;
+        }
+        
+        float dx = static_cast<float>(node.x - x);
+        float dz = static_cast<float>(node.z - z);
+        float dist = sqrtf(dx * dx + dz * dz);
+        
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestIndex = i;
+        }
+    }
+    
+    return bestIndex;
+}
+
+/*
+ * FindPath - A* pathfinding between two nodes
+ * @param startNode Starting node index
+ * @param goalNode Goal node index
+ * @param path Output vector of node indices forming the path
+ * @return true if path found
+ */
+static bool FindPath(size_t startNode, size_t goalNode, std::vector<size_t>& path) {
+    path.clear();
+    
+    if (!g_roadNetwork.isLoaded || startNode >= g_roadNetwork.nodes.size() ||
+        goalNode >= g_roadNetwork.nodes.size()) {
+        return false;
+    }
+    
+    const RoadNode& goalNodeRef = g_roadNetwork.nodes[goalNode];
+    
+    /* A* algorithm */
+    std::priority_queue<AStarNode, std::vector<AStarNode>, std::greater<AStarNode>> openSet;
+    std::unordered_map<size_t, float> gScores;
+    std::unordered_map<size_t, size_t> cameFrom;
+    std::unordered_map<size_t, bool> closedSet;
+    
+    /* Initialize start node */
+    AStarNode startANode;
+    startANode.nodeIndex = startNode;
+    startANode.gScore = 0.0f;
+    const RoadNode& startNodeRef = g_roadNetwork.nodes[startNode];
+    float heuristic = sqrtf(static_cast<float>((goalNodeRef.x - startNodeRef.x) * (goalNodeRef.x - startNodeRef.x) +
+                                                (goalNodeRef.z - startNodeRef.z) * (goalNodeRef.z - startNodeRef.z)));
+    startANode.fScore = heuristic;
+    startANode.parentIndex = SIZE_MAX;
+    
+    openSet.push(startANode);
+    gScores[startNode] = 0.0f;
+    
+    while (!openSet.empty()) {
+        AStarNode current = openSet.top();
+        openSet.pop();
+        
+        if (current.nodeIndex == goalNode) {
+            /* Reconstruct path */
+            size_t node = goalNode;
+            while (node != SIZE_MAX && cameFrom.find(node) != cameFrom.end()) {
+                path.push_back(node);
+                node = cameFrom[node];
+            }
+            path.push_back(startNode);
+            std::reverse(path.begin(), path.end());
+            
+            DebugLog("FindPath: Found path with %zu nodes", path.size());
+            return true;
+        }
+        
+        if (closedSet.find(current.nodeIndex) != closedSet.end()) {
+            continue;
+        }
+        closedSet[current.nodeIndex] = true;
+        
+        const RoadNode& currentNode = g_roadNetwork.nodes[current.nodeIndex];
+        
+        /* Explore neighbors */
+        for (size_t edgeIdx : currentNode.connectedEdges) {
+            const RoadEdge& edge = g_roadNetwork.edges[edgeIdx];
+            
+            /* Skip non-fire truck routes */
+            if (!edge.isFireTruckRoute) continue;
+            
+            /* Determine neighbor node */
+            size_t neighborIdx;
+            if (edge.node1Idx == current.nodeIndex) {
+                neighborIdx = edge.node2Idx;
+            } else if (!edge.isOneWay && edge.node2Idx == current.nodeIndex) {
+                neighborIdx = edge.node1Idx;
+            } else {
+                continue; /* Can't traverse this edge */
+            }
+            
+            if (closedSet.find(neighborIdx) != closedSet.end()) {
+                continue;
+            }
+            
+            float tentativeG = gScores[current.nodeIndex] + edge.length;
+            
+            if (gScores.find(neighborIdx) == gScores.end() || tentativeG < gScores[neighborIdx]) {
+                gScores[neighborIdx] = tentativeG;
+                cameFrom[neighborIdx] = current.nodeIndex;
+                
+                const RoadNode& neighborNode = g_roadNetwork.nodes[neighborIdx];
+                float h = sqrtf(static_cast<float>((goalNodeRef.x - neighborNode.x) * (goalNodeRef.x - neighborNode.x) +
+                                                    (goalNodeRef.z - neighborNode.z) * (goalNodeRef.z - neighborNode.z)));
+                
+                AStarNode neighborANode;
+                neighborANode.nodeIndex = neighborIdx;
+                neighborANode.gScore = tentativeG;
+                neighborANode.fScore = tentativeG + h;
+                neighborANode.parentIndex = current.nodeIndex;
+                
+                openSet.push(neighborANode);
+            }
+        }
+    }
+    
+    DebugLog("FindPath: No path found from node %zu to node %zu", startNode, goalNode);
+    return false;
+}
+
+/*
+ * SmoothPath - Apply Bezier curve smoothing to a planned route
+ * Creates additional waypoints for smooth turns
+ * @param route The route to smooth (modified in place)
+ */
+static void SmoothPath(PlannedRoute& route) {
+    if (route.waypoints.size() < 3) return;
+    
+    std::vector<PathWaypoint> smoothedWaypoints;
+    
+    for (size_t i = 0; i < route.waypoints.size(); ++i) {
+        const PathWaypoint& current = route.waypoints[i];
+        
+        if (i == 0 || i == route.waypoints.size() - 1) {
+            /* Keep start and end points as-is */
+            smoothedWaypoints.push_back(current);
+        } else {
+            /* Smooth middle points using Bezier interpolation */
+            const PathWaypoint& prev = route.waypoints[i - 1];
+            const PathWaypoint& next = route.waypoints[i + 1];
+            
+            /* Calculate segment lengths */
+            float lenPrev = sqrtf(static_cast<float>((current.x - prev.x) * (current.x - prev.x) +
+                                                      (current.z - prev.z) * (current.z - prev.z)));
+            float lenNext = sqrtf(static_cast<float>((next.x - current.x) * (next.x - current.x) +
+                                                      (next.z - current.z) * (next.z - current.z)));
+            
+            /* Only add smoothing points if segments are long enough */
+            if (lenPrev > MIN_TURN_RADIUS * 2 && lenNext > MIN_TURN_RADIUS * 2) {
+                /* Add approach point before the turn */
+                PathWaypoint approach;
+                approach.x = current.x - (current.x - prev.x) * BEZIER_SMOOTHING_FACTOR;
+                approach.z = current.z - (current.z - prev.z) * BEZIER_SMOOTHING_FACTOR;
+                approach.targetHeading = atan2f(static_cast<float>(current.x - prev.x),
+                                                 -static_cast<float>(current.z - prev.z)) * RAD_TO_DEG;
+                approach.speed = TRUCK_APPROACH_SPEED * 0.7f; /* Slow down for turn */
+                approach.isSmoothed = true;
+                smoothedWaypoints.push_back(approach);
+                
+                /* Add the actual waypoint */
+                PathWaypoint wp = current;
+                wp.speed = TRUCK_APPROACH_SPEED * 0.5f; /* Slowest at apex of turn */
+                smoothedWaypoints.push_back(wp);
+                
+                /* Add exit point after the turn */
+                PathWaypoint exit;
+                exit.x = current.x + (next.x - current.x) * BEZIER_SMOOTHING_FACTOR;
+                exit.z = current.z + (next.z - current.z) * BEZIER_SMOOTHING_FACTOR;
+                exit.targetHeading = atan2f(static_cast<float>(next.x - current.x),
+                                            -static_cast<float>(next.z - current.z)) * RAD_TO_DEG;
+                exit.speed = TRUCK_APPROACH_SPEED * 0.7f;
+                exit.isSmoothed = true;
+                smoothedWaypoints.push_back(exit);
+            } else {
+                /* Segment too short, just keep the waypoint */
+                smoothedWaypoints.push_back(current);
+            }
+        }
+    }
+    
+    /* Calculate target headings for all waypoints */
+    for (size_t i = 0; i < smoothedWaypoints.size() - 1; ++i) {
+        const PathWaypoint& wp = smoothedWaypoints[i];
+        const PathWaypoint& next = smoothedWaypoints[i + 1];
+        smoothedWaypoints[i].targetHeading = atan2f(static_cast<float>(next.x - wp.x),
+                                                     -static_cast<float>(next.z - wp.z)) * RAD_TO_DEG;
+    }
+    /* Last waypoint keeps its heading */
+    if (smoothedWaypoints.size() > 1) {
+        smoothedWaypoints.back().targetHeading = smoothedWaypoints[smoothedWaypoints.size() - 2].targetHeading;
+    }
+    
+    route.waypoints = smoothedWaypoints;
+    DebugLog("SmoothPath: Created %zu smoothed waypoints", route.waypoints.size());
+}
+
+/*
+ * PlanRouteToTarget - Plan a route from start position to target using road network
+ * Falls back to direct approach if no road network available
+ * 
+ * @param startX Starting X coordinate
+ * @param startZ Starting Z coordinate  
+ * @param targetX Target X coordinate
+ * @param targetZ Target Z coordinate
+ * @param targetHeading Final heading at target
+ * @return Planned route (may be empty if planning fails)
+ */
+static PlannedRoute PlanRouteToTarget(double startX, double startZ, double targetX, double targetZ, float targetHeading) {
+    PlannedRoute route;
+    route.currentWaypointIndex = 0;
+    route.isValid = false;
+    route.isCompleted = false;
+    
+    DebugLog("PlanRouteToTarget: Planning from (%.2f, %.2f) to (%.2f, %.2f)",
+             startX, startZ, targetX, targetZ);
+    
+    if (!g_roadNetwork.isLoaded) {
+        DebugLog("PlanRouteToTarget: No road network loaded, using direct approach");
+        
+        /* Create simple direct path with intermediate waypoints */
+        float dx = static_cast<float>(targetX - startX);
+        float dz = static_cast<float>(targetZ - startZ);
+        float dist = sqrtf(dx * dx + dz * dz);
+        int numWaypoints = static_cast<int>(dist / PATH_NODE_DISTANCE) + 2;
+        numWaypoints = std::min(numWaypoints, MAX_PATH_NODES);
+        
+        for (int i = 0; i < numWaypoints; ++i) {
+            float t = static_cast<float>(i) / static_cast<float>(numWaypoints - 1);
+            PathWaypoint wp;
+            wp.x = startX + dx * t;
+            wp.z = startZ + dz * t;
+            wp.targetHeading = atan2f(dx, -dz) * RAD_TO_DEG;
+            wp.speed = TRUCK_APPROACH_SPEED;
+            wp.isSmoothed = false;
+            route.waypoints.push_back(wp);
+        }
+        
+        /* Set final waypoint heading */
+        if (!route.waypoints.empty()) {
+            route.waypoints.back().targetHeading = targetHeading;
+            route.waypoints.back().speed = 0.0f; /* Stop at destination */
+        }
+        
+        route.isValid = true;
+        return route;
+    }
+    
+    /* Find nearest nodes to start and target */
+    /* First, convert to road network coordinates (they're relative to airport ref point) */
+    double startXLocal = startX, startZLocal = startZ;
+    double targetXLocal = targetX, targetZLocal = targetZ;
+    
+    /* If using lat/lon reference, we need to adjust coordinates */
+    /* For now, assume aircraft local coords are same as road network coords */
+    
+    size_t startNode = FindNearestNode(startXLocal, startZLocal, true);
+    size_t goalNode = FindNearestNode(targetXLocal, targetZLocal, false);
+    
+    if (startNode == SIZE_MAX || goalNode == SIZE_MAX) {
+        DebugLog("PlanRouteToTarget: Could not find start or goal node, using direct approach");
+        
+        /* Fallback to direct path */
+        PathWaypoint start, end;
+        start.x = startX; start.z = startZ;
+        start.targetHeading = atan2f(static_cast<float>(targetX - startX), 
+                                      -static_cast<float>(targetZ - startZ)) * RAD_TO_DEG;
+        start.speed = TRUCK_APPROACH_SPEED;
+        start.isSmoothed = false;
+        
+        end.x = targetX; end.z = targetZ;
+        end.targetHeading = targetHeading;
+        end.speed = 0.0f;
+        end.isSmoothed = false;
+        
+        route.waypoints.push_back(start);
+        route.waypoints.push_back(end);
+        route.isValid = true;
+        return route;
+    }
+    
+    DebugLog("PlanRouteToTarget: Start node %zu, Goal node %zu", startNode, goalNode);
+    
+    /* Run A* pathfinding */
+    std::vector<size_t> nodePath;
+    if (!FindPath(startNode, goalNode, nodePath)) {
+        DebugLog("PlanRouteToTarget: A* failed, using direct approach");
+        
+        /* Fallback to direct path */
+        PathWaypoint start, end;
+        start.x = startX; start.z = startZ;
+        start.targetHeading = atan2f(static_cast<float>(targetX - startX),
+                                      -static_cast<float>(targetZ - startZ)) * RAD_TO_DEG;
+        start.speed = TRUCK_APPROACH_SPEED;
+        start.isSmoothed = false;
+        
+        end.x = targetX; end.z = targetZ;
+        end.targetHeading = targetHeading;
+        end.speed = 0.0f;
+        end.isSmoothed = false;
+        
+        route.waypoints.push_back(start);
+        route.waypoints.push_back(end);
+        route.isValid = true;
+        return route;
+    }
+    
+    /* Convert node path to waypoints */
+    /* Add start position as first waypoint */
+    PathWaypoint startWp;
+    startWp.x = startX;
+    startWp.z = startZ;
+    startWp.speed = TRUCK_APPROACH_SPEED;
+    startWp.isSmoothed = false;
+    route.waypoints.push_back(startWp);
+    
+    /* Add road network nodes as waypoints */
+    for (size_t nodeIdx : nodePath) {
+        const RoadNode& node = g_roadNetwork.nodes[nodeIdx];
+        PathWaypoint wp;
+        /* Convert back to aircraft local coordinates if needed */
+        wp.x = node.x;
+        wp.z = node.z;
+        wp.speed = TRUCK_APPROACH_SPEED;
+        wp.isSmoothed = false;
+        route.waypoints.push_back(wp);
+    }
+    
+    /* Add target as final waypoint */
+    PathWaypoint endWp;
+    endWp.x = targetX;
+    endWp.z = targetZ;
+    endWp.targetHeading = targetHeading;
+    endWp.speed = 0.0f;
+    endWp.isSmoothed = false;
+    route.waypoints.push_back(endWp);
+    
+    /* Calculate headings for all waypoints */
+    for (size_t i = 0; i < route.waypoints.size() - 1; ++i) {
+        const PathWaypoint& wp = route.waypoints[i];
+        const PathWaypoint& next = route.waypoints[i + 1];
+        route.waypoints[i].targetHeading = atan2f(static_cast<float>(next.x - wp.x),
+                                                   -static_cast<float>(next.z - wp.z)) * RAD_TO_DEG;
+    }
+    
+    /* Apply Bezier smoothing for natural turns */
+    SmoothPath(route);
+    
+    route.isValid = true;
+    DebugLog("PlanRouteToTarget: Created route with %zu waypoints", route.waypoints.size());
+    
+    return route;
+}
+
+/*
+ * UpdateTruckFollowingPath - Update truck position/heading following planned path
+ * Implements smooth steering and speed control
+ * 
+ * @param truck The truck to update
+ * @param dt Delta time in seconds
+ */
+static void UpdateTruckFollowingPath(FireTruck& truck, float dt) {
+    if (!truck.route.isValid || truck.route.isCompleted) {
+        return;
+    }
+    
+    /* Get current target waypoint */
+    if (truck.route.currentWaypointIndex >= truck.route.waypoints.size()) {
+        truck.route.isCompleted = true;
+        truck.positioned = true;
+        DebugLog("UpdateTruckFollowingPath: Truck completed route");
+        return;
+    }
+    
+    const PathWaypoint& target = truck.route.waypoints[truck.route.currentWaypointIndex];
+    
+    /* Calculate distance to current waypoint */
+    float dx = static_cast<float>(target.x - truck.x);
+    float dz = static_cast<float>(target.z - truck.z);
+    float distance = sqrtf(dx * dx + dz * dz);
+    
+    /* Check if waypoint reached */
+    if (distance < PATH_REACH_THRESHOLD) {
+        truck.route.currentWaypointIndex++;
+        
+        if (truck.route.currentWaypointIndex >= truck.route.waypoints.size()) {
+            truck.route.isCompleted = true;
+            truck.positioned = true;
+            truck.targetSpeed = 0.0f;
+            DebugLogVerbose("UpdateTruckFollowingPath: Route completed");
+            return;
+        }
+        
+        DebugLogVerbose("UpdateTruckFollowingPath: Reached waypoint %zu/%zu",
+                        truck.route.currentWaypointIndex, truck.route.waypoints.size());
+    }
+    
+    /* Calculate desired heading to target */
+    float desiredHeading = atan2f(dx, -dz) * RAD_TO_DEG;
+    
+    /* Look ahead for upcoming turns */
+    float lookAheadDist = TURN_ANTICIPATION;
+    float accumulatedDist = distance;
+    float futureHeading = desiredHeading;
+    
+    for (size_t i = truck.route.currentWaypointIndex + 1; 
+         i < truck.route.waypoints.size() && accumulatedDist < lookAheadDist; ++i) {
+        const PathWaypoint& wp = truck.route.waypoints[i];
+        const PathWaypoint& prevWp = truck.route.waypoints[i - 1];
+        
+        float segDx = static_cast<float>(wp.x - prevWp.x);
+        float segDz = static_cast<float>(wp.z - prevWp.z);
+        float segLen = sqrtf(segDx * segDx + segDz * segDz);
+        accumulatedDist += segLen;
+        
+        if (accumulatedDist >= lookAheadDist) {
+            futureHeading = atan2f(segDx, -segDz) * RAD_TO_DEG;
+            break;
+        }
+    }
+    
+    /* Calculate heading difference for steering */
+    float headingDiff = desiredHeading - truck.heading;
+    while (headingDiff > 180.0f) headingDiff -= 360.0f;
+    while (headingDiff < -180.0f) headingDiff += 360.0f;
+    
+    /* Anticipate turns: blend current heading target with future heading */
+    float futureHeadingDiff = futureHeading - truck.heading;
+    while (futureHeadingDiff > 180.0f) futureHeadingDiff -= 360.0f;
+    while (futureHeadingDiff < -180.0f) futureHeadingDiff += 360.0f;
+    
+    /* Use the more aggressive turn if upcoming turn is sharper */
+    if (fabsf(futureHeadingDiff) > fabsf(headingDiff) && distance < TURN_ANTICIPATION) {
+        headingDiff = headingDiff * 0.7f + futureHeadingDiff * 0.3f;
+    }
+    
+    /* Set steering angle based on heading difference */
+    truck.frontSteeringAngle = ClampSteeringAngle(headingDiff);
+    truck.rearSteeringAngle = CalculateRearSteeringAngle(truck.frontSteeringAngle);
+    
+    /* Calculate minimum turn radius and adjust speed */
+    float turnRadius = WHEELBASE / fabsf(tanf(truck.frontSteeringAngle * DEG_TO_RAD) + 0.01f);
+    
+    /* Speed control: slower for tighter turns and approaching waypoints */
+    float maxSpeedForTurn = sqrtf(turnRadius * 2.0f); /* Simple physics approximation */
+    maxSpeedForTurn = fminf(maxSpeedForTurn, TRUCK_APPROACH_SPEED);
+    maxSpeedForTurn = fmaxf(maxSpeedForTurn, TRUCK_TURN_IN_PLACE_SPEED);
+    
+    /* Target speed from waypoint */
+    float waypointSpeed = target.speed > 0.0f ? target.speed : TRUCK_APPROACH_SPEED;
+    
+    /* Slow down approaching waypoints */
+    if (distance < TRUCK_SLOWDOWN_DISTANCE) {
+        float slowdownFactor = distance / TRUCK_SLOWDOWN_DISTANCE;
+        waypointSpeed = fmaxf(TRUCK_TURN_IN_PLACE_SPEED, waypointSpeed * slowdownFactor);
+    }
+    
+    /* Use the minimum of turn speed and waypoint speed */
+    truck.targetSpeed = fminf(maxSpeedForTurn, waypointSpeed);
+    
+    /* Smooth speed transition */
+    truck.speed = UpdateSpeedSmooth(truck.speed, truck.targetSpeed, dt);
+    
+    /* Calculate turning rate using Ackermann steering */
+    float turningRate = CalculateTurningRate(truck.speed, truck.frontSteeringAngle, truck.rearSteeringAngle);
+    
+    /* Update heading */
+    truck.heading += turningRate * dt;
+    while (truck.heading >= 360.0f) truck.heading -= 360.0f;
+    while (truck.heading < 0.0f) truck.heading += 360.0f;
+    
+    /* Move truck forward */
+    float headingRad = truck.heading * DEG_TO_RAD;
+    float moveDistance = truck.speed * dt;
+    
+    truck.x += sinf(headingRad) * moveDistance;
+    truck.z += -cosf(headingRad) * moveDistance;
+    truck.y = GetTerrainHeight(static_cast<float>(truck.x), static_cast<float>(truck.z));
+    
+    /* Update wheel rotation */
+    UpdateWheelRotationAngle(truck, moveDistance);
+    
+    /* Update instance position */
+    if (truck.instance) {
+        XPLMDrawInfo_t drawInfo;
+        drawInfo.structSize = sizeof(XPLMDrawInfo_t);
+        drawInfo.x = static_cast<float>(truck.x);
+        drawInfo.y = static_cast<float>(truck.y);
+        drawInfo.z = static_cast<float>(truck.z);
+        drawInfo.pitch = 0.0f;
+        drawInfo.heading = truck.heading;
+        drawInfo.roll = 0.0f;
+        XPLMInstanceSetPosition(truck.instance, &drawInfo, nullptr);
+    }
 }
