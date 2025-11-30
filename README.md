@@ -105,4 +105,4 @@ X-Plane 12 插件，模拟飞机过水门仪式。两辆消防车驶向飞机并
 
 ## License
 
-MIT
+GPLv3 详见 LICENSE 文件
