@@ -6,6 +6,9 @@
  * will resolve these symbols to the actual implementations.
  * 
  * Only used on Windows where the linker requires all symbols to be resolved.
+ * 
+ * NOTE: The include paths below use the SDK directory structure. The CMakeLists.txt
+ * adds ${XPLM_SDK_PATH}/CHeaders/XPLM to the include directories.
  */
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -23,7 +26,11 @@
 #include "XPLMScenery.h"
 #include "XPLMInstance.h"
 
-/* Stub implementations - these will be overridden by X-Plane at runtime */
+/*
+ * Stub implementations - these functions are placeholder implementations
+ * that allow the plugin to link on Windows. At runtime, X-Plane will
+ * override these with the actual SDK implementations.
+ */
 
 /* XPLMDataAccess stubs */
 XPLMDataRef XPLMFindDataRef(const char*) { return nullptr; }
@@ -56,6 +63,7 @@ XPLMObjectRef XPLMLoadObject(const char*) { return nullptr; }
 void XPLMUnloadObject(XPLMObjectRef) {}
 XPLMProbeRef XPLMCreateProbe(XPLMProbeType) { return nullptr; }
 void XPLMDestroyProbe(XPLMProbeRef) {}
+/* Returns xplm_ProbeError (defined in XPLMScenery.h) as probe cannot work without X-Plane */
 XPLMProbeResult XPLMProbeTerrainXYZ(XPLMProbeRef, float, float, float, XPLMProbeInfo_t*) { return xplm_ProbeError; }
 
 /* XPLMInstance stubs */
@@ -63,7 +71,10 @@ XPLMInstanceRef XPLMCreateInstance(XPLMObjectRef, const char**) { return nullptr
 void XPLMDestroyInstance(XPLMInstanceRef) {}
 void XPLMInstanceSetPosition(XPLMInstanceRef, const XPLMDrawInfo_t*, const float*) {}
 
-/* XPLMGraphics stubs */
+/* XPLMGraphics stubs
+ * Return 1 (success) since registration/unregistration will be handled by X-Plane at runtime.
+ * These stubs just need to satisfy the linker.
+ */
 void XPLMSetGraphicsState(int, int, int, int, int, int, int) {}
 int XPLMRegisterDrawCallback(XPLMDrawCallback_f, XPLMDrawingPhase, int, void*) { return 1; }
 int XPLMUnregisterDrawCallback(XPLMDrawCallback_f, XPLMDrawingPhase, int, void*) { return 1; }
