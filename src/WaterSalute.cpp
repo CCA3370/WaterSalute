@@ -374,10 +374,9 @@ static bool FindResourcePath() {
     }
     
     /* Second, try parent directory (for platform-specific subdirectory layout) */
-    /* Copy g_pluginPath and go up one directory */
+    /* Use snprintf for safer string copying */
     char parentPath[512];
-    strncpy(parentPath, g_pluginPath, sizeof(parentPath) - 1);
-    parentPath[sizeof(parentPath) - 1] = '\0';
+    snprintf(parentPath, sizeof(parentPath), "%s", g_pluginPath);
     
     char* lastSlash = strrchr(parentPath, '/');
     if (!lastSlash) lastSlash = strrchr(parentPath, '\\');
@@ -394,14 +393,13 @@ static bool FindResourcePath() {
             DebugLog("Found resources at: %s", g_resourcePath);
             return true;
         }
-    }
-    
-    /* Third, try going up two directories (for deeply nested structures) */
-    if (lastSlash) {
-        lastSlash = strrchr(parentPath, '/');
-        if (!lastSlash) lastSlash = strrchr(parentPath, '\\');
-        if (lastSlash) {
-            *lastSlash = '\0';
+        
+        /* Third, try going up two directories (for deeply nested structures) */
+        /* Only attempt if previous directory traversal was successful */
+        char* secondLastSlash = strrchr(parentPath, '/');
+        if (!secondLastSlash) secondLastSlash = strrchr(parentPath, '\\');
+        if (secondLastSlash) {
+            *secondLastSlash = '\0';
             
             snprintf(testPath, sizeof(testPath), "%s/resources/firetruck.obj", parentPath);
             DebugLog("Trying resource path 3: %s", testPath);
