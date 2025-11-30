@@ -778,6 +778,9 @@ PLUGIN_API void XPluginStop(void) {
     /* Cleanup */
     UnregisterDrawCallback();
     
+    /* Destroy water jet instances before truck cleanup */
+    DestroyWaterJetInstances();
+    
     /* Unregister custom datarefs */
     UnregisterCustomDataRefs();
     
@@ -1265,11 +1268,13 @@ static void StopWaterSalute() {
     DebugLog("StopWaterSalute called, current state: %d", g_state);
     
     if (g_state == STATE_WATER_SPRAYING) {
+        DestroyWaterJetInstances();
         UnregisterDrawCallback();
         g_state = STATE_TRUCKS_LEAVING;
         DebugLog("Stopping water and trucks leaving");
     } else if (g_state != STATE_IDLE) {
         /* Immediate cleanup for other states */
+        DestroyWaterJetInstances();
         CleanupTruck(g_leftTruck);
         CleanupTruck(g_rightTruck);
         UnregisterDrawCallback();
