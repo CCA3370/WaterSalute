@@ -352,8 +352,9 @@ PLUGIN_API void XPluginReceiveMessage(XPLMPluginID inFrom, int inMsg, void* inPa
  * FindResourcePath - Find the resources directory
  * 
  * X-Plane plugins can be installed in different directory structures:
- * 1. Flat: plugins/WaterSalute/WaterSalute.xpl with resources at plugins/WaterSalute/resources/
- * 2. Platform-specific: plugins/WaterSalute/64/win.xpl with resources at plugins/WaterSalute/resources/
+ * 1. Flat: WaterSalute/WaterSalute.xpl with resources at WaterSalute/resources/
+ * 2. Platform-specific: WaterSalute/win_64/WaterSalute.xpl (or mac_x64/, lin_x64/)
+ *    with resources at WaterSalute/resources/
  * 
  * This function tries both layouts and sets g_resourcePath to the correct path.
  */
