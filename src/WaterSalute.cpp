@@ -1516,22 +1516,14 @@ static void UpdateTrucks(float dt) {
     };
     
     auto updateTruckLeaving = [dt](FireTruck& truck) -> bool {
-        /* STEP 1: Set front wheel steering angle for turning right (positive angle) */
-        truck.frontSteeringAngle = MAX_STEERING_ANGLE;
-        
-        /* STEP 2: Calculate rear wheel angle from front wheel angle */
-        truck.rearSteeringAngle = CalculateRearSteeringAngle(truck.frontSteeringAngle);
+        /* Drive straight when leaving - set steering angles to 0 */
+        truck.frontSteeringAngle = 0.0f;
+        truck.rearSteeringAngle = 0.0f;
         
         /* Set speed for leaving */
         truck.speed = TRUCK_APPROACH_SPEED * TRUCK_LEAVING_SPEED_MULT;
         
-        /* STEP 3: Calculate turning rate from front and rear wheel angles using Ackermann method */
-        float turningRate = CalculateTurningRate(truck.speed, truck.frontSteeringAngle, truck.rearSteeringAngle);
-        
-        /* STEP 4: Update heading based on turning rate */
-        truck.heading += turningRate * dt;
-        while (truck.heading >= 360.0f) truck.heading -= 360.0f;
-        while (truck.heading < 0.0f) truck.heading += 360.0f;
+        /* Heading remains constant when driving straight (no turning) */
         
         /* Move forward in the direction the truck is facing
          * Using X-Plane coordinate system:

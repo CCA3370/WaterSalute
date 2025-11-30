@@ -4,6 +4,12 @@ project(WaterSalute VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Force x86_64 architecture on macOS for X-Plane 12 compatibility
+if(APPLE)
+    set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "Build architectures for macOS" FORCE)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "Minimum macOS deployment version" FORCE)
+endif()
+
 # X-Plane SDK paths
 set(XPLM_SDK_PATH "${CMAKE_SOURCE_DIR}/SDK")
 
@@ -69,6 +75,7 @@ if(WIN32)
 elseif(APPLE)
     target_compile_options(WaterSalute PRIVATE
         -fvisibility=hidden
+        -fPIC
     )
     target_link_options(WaterSalute PRIVATE
         -flat_namespace
