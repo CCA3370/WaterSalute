@@ -139,7 +139,7 @@ static void DebugLog(const char* format, ...) {
 /*
  * XPluginStart - Called when the plugin is loaded
  */
-XPLM_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
+PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     strcpy(outName, "Water Salute");
     strcpy(outSig, "com.xplane.watersalute");
     strcpy(outDesc, "Water salute ceremony with fire trucks");
@@ -201,7 +201,7 @@ XPLM_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
 /*
  * XPluginStop - Called when the plugin is unloaded
  */
-XPLM_API void XPluginStop(void) {
+PLUGIN_API void XPluginStop(void) {
     DebugLog("Plugin stopping...");
     
     /* Cleanup */
@@ -236,7 +236,7 @@ XPLM_API void XPluginStop(void) {
 /*
  * XPluginEnable - Called when the plugin is enabled
  */
-XPLM_API int XPluginEnable(void) {
+PLUGIN_API int XPluginEnable(void) {
     DebugLog("Plugin enabled");
     return 1;
 }
@@ -244,7 +244,7 @@ XPLM_API int XPluginEnable(void) {
 /*
  * XPluginDisable - Called when the plugin is disabled
  */
-XPLM_API void XPluginDisable(void) {
+PLUGIN_API void XPluginDisable(void) {
     DebugLog("Plugin disabled");
     StopWaterSalute();
 }
@@ -252,7 +252,7 @@ XPLM_API void XPluginDisable(void) {
 /*
  * XPluginReceiveMessage - Handle messages from X-Plane
  */
-XPLM_API void XPluginReceiveMessage(XPLMPluginID inFrom, int inMsg, void* inParam) {
+PLUGIN_API void XPluginReceiveMessage(XPLMPluginID inFrom, int inMsg, void* inParam) {
     (void)inFrom;
     (void)inParam;
     
