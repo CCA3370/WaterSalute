@@ -20,7 +20,9 @@
 #include <cmath>
 #include <cstdarg>
 #include <cerrno>
+#include <vector>
 #include <string>
+#include <algorithm>
 
 #include "XPLMDefs.h"
 #include "XPLMPlugin.h"
@@ -44,7 +46,12 @@ static const float TRUCK_LEAVING_DISTANCE = 600.0f;  /* Distance from aircraft t
 static const float TRUCK_STOP_DISTANCE = 200.0f;   /* Distance in front of aircraft to stop (meters) */
 static const float TRUCK_EXTRA_SPACING = 40.0f;    /* Extra spacing beyond wingspan (meters) */
 static const float TRUCK_POSITIONING_THRESHOLD = 50.0f; /* Distance threshold to start positioning phase (meters) */
-static const XPLMDrawingPhase WATER_DRAWING_PHASE = xplm_Phase_Modern3D; /* Drawing phase for water effects */
+static const float WATER_JET_HEIGHT = 25.0f;       /* Maximum height of water arch (meters) */
+static const float WATER_JET_DURATION = 0.5f;      /* Time for particle to reach apex */
+static const float PARTICLE_LIFETIME = 2.0f;       /* Particle lifetime in seconds */
+static const int   NUM_PARTICLES_PER_JET = 100;    /* Number of particles per water jet */
+static const float PARTICLE_EMIT_RATE = 0.02f;     /* Time between particle emissions (seconds) */
+static const XPLMDrawingPhase WATER_DRAWING_PHASE = xplm_Phase_Modern3D; /* Drawing phase for water particles */
 
 /* Wingspan validation constants */
 static const float MIN_SEMISPAN_METERS = 2.5f;     /* Minimum semispan (half wingspan) in meters (small aircraft ~5m wingspan) */
@@ -73,15 +80,26 @@ enum PluginState {
     STATE_TRUCKS_LEAVING
 };
 
+/* Water particle */
+struct WaterParticle {
+    float x, y, z;           /* Current position */
+    float vx, vy, vz;        /* Velocity */
+    float lifetime;          /* Remaining lifetime */
+    float maxLifetime;       /* Original lifetime */
+    bool active;
+    XPLMInstanceRef instance; /* Instance for rendering this particle */
+};
+
 /* Fire truck */
 struct FireTruck {
-    XPLMInstanceRef instance;        /* Truck model instance */
-    XPLMInstanceRef waterJetInstance; /* Water jet particle system instance */
+    XPLMInstanceRef instance;
     double x, y, z;          /* Current position (OpenGL coords) */
     float heading;           /* Current heading in degrees */
     float targetX, targetZ;  /* Target position */
     float targetHeading;     /* Target heading */
     bool positioned;         /* Has reached target position */
+    std::vector<WaterParticle> particles;
+    float lastEmitTime;      /* Time of last particle emission */
     float nozzleOffsetX;     /* Nozzle position offset from truck center */
     float nozzleOffsetY;     /* Nozzle height */
     float nozzleOffsetZ;     /* Nozzle forward offset */
@@ -100,7 +118,7 @@ static int g_menuStartItem = -1;
 static int g_menuStopItem = -1;
 
 static XPLMObjectRef g_truckObject = nullptr;
-static XPLMObjectRef g_waterJetObject = nullptr;   /* Water jet particle system OBJ (references PSS) */
+static XPLMObjectRef g_waterDropObject = nullptr;  /* Water droplet model for particle instances */
 static FireTruck g_leftTruck;
 static FireTruck g_rightTruck;
 static XPLMProbeRef g_terrainProbe = nullptr;
@@ -239,8 +257,9 @@ static char g_pluginPath[512];
 static char g_resourcePath[512];  /* Path to resources directory */
 static float g_debugLogTimer = 0.0f;               /* Timer for periodic debug logging */
 static int g_drawCallbackCallCount = 0;            /* Counter for draw callback calls */
+static int g_particlesEmittedTotal = 0;            /* Total particles emitted */
 
-/* Static array for instance creation (no datarefs needed) */
+/* Static array for instance creation (no datarefs needed for water droplets) */
 static const char* g_noDataRefs[] = { nullptr };
 
 /* Forward declarations */
@@ -249,21 +268,20 @@ static void MenuHandler(void* inMenuRef, void* inItemRef);
 static void StartWaterSalute();
 static void StopWaterSalute();
 static void UpdateTrucks(float dt);
-static void UpdateWaterJets(float dt);
+static void UpdateWaterParticles(float dt);
+static void EmitParticle(FireTruck& truck);
 static void UpdateMenuState();
 static float GetTerrainHeight(float x, float z);
 static void InitializeTruck(FireTruck& truck);
 static void CleanupTruck(FireTruck& truck);
 static bool FindResourcePath();
 static bool LoadFireTruckModel();
-static bool LoadWaterJetModel();
-static int DrawWaterCallback(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon);
+static bool LoadWaterDropModel();
+static int DrawWaterParticles(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon);
 static void RegisterDrawCallback();
 static void UnregisterDrawCallback();
 static void RegisterCustomDataRefs();
 static void UnregisterCustomDataRefs();
-static void CreateWaterJetInstances();
-static void DestroyWaterJetInstances();
 
 /* Helper function to get truck by index (0 = left, 1 = right) */
 static FireTruck* GetTruckByIndex(int index) {
@@ -487,11 +505,8 @@ static void LogDebugStatus() {
     DebugLog("=== DEBUG STATUS ===");
     DebugLog("  State: %s (%d)", GetStateName(g_state), g_state);
     DebugLog("  Truck Object Loaded: %s", g_truckObject ? "YES" : "NO");
-    DebugLog("  Water Jet Object Loaded: %s", g_waterJetObject ? "YES" : "NO");
     DebugLog("  Left Truck Instance: %s", g_leftTruck.instance ? "YES" : "NO");
     DebugLog("  Right Truck Instance: %s", g_rightTruck.instance ? "YES" : "NO");
-    DebugLog("  Left Water Jet Instance: %s", g_leftTruck.waterJetInstance ? "YES" : "NO");
-    DebugLog("  Right Water Jet Instance: %s", g_rightTruck.waterJetInstance ? "YES" : "NO");
     DebugLog("  Left Truck Position: (%.2f, %.2f, %.2f), Heading: %.1f, Positioned: %s",
              g_leftTruck.x, g_leftTruck.y, g_leftTruck.z, g_leftTruck.heading,
              g_leftTruck.positioned ? "YES" : "NO");
@@ -506,8 +521,11 @@ static void LogDebugStatus() {
              g_leftTruck.cannonPitch, g_leftTruck.cannonYaw);
     DebugLog("  Right Cannon: Pitch=%.1f deg, Yaw=%.1f deg", 
              g_rightTruck.cannonPitch, g_rightTruck.cannonYaw);
+    DebugLog("  Left Truck Particles: %zu", g_leftTruck.particles.size());
+    DebugLog("  Right Truck Particles: %zu", g_rightTruck.particles.size());
     DebugLog("  Draw Callback Registered: %s", g_drawCallbackRegistered ? "YES" : "NO");
     DebugLog("  Draw Callback Call Count: %d", g_drawCallbackCallCount);
+    DebugLog("  Total Particles Emitted: %d", g_particlesEmittedTotal);
     DebugLog("===================");
 }
 
@@ -758,8 +776,8 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     /* Load fire truck model */
     LoadFireTruckModel();
     
-    /* Load water jet particle system OBJ */
-    LoadWaterJetModel();
+    /* Load water droplet model for particle rendering */
+    LoadWaterDropModel();
     
     /* Register custom datarefs for fire truck control */
     RegisterCustomDataRefs();
@@ -778,9 +796,6 @@ PLUGIN_API void XPluginStop(void) {
     /* Cleanup */
     UnregisterDrawCallback();
     
-    /* Destroy water jet instances before truck cleanup */
-    DestroyWaterJetInstances();
-    
     /* Unregister custom datarefs */
     UnregisterCustomDataRefs();
     
@@ -797,9 +812,9 @@ PLUGIN_API void XPluginStop(void) {
         g_truckObject = nullptr;
     }
     
-    if (g_waterJetObject) {
-        XPLMUnloadObject(g_waterJetObject);
-        g_waterJetObject = nullptr;
+    if (g_waterDropObject) {
+        XPLMUnloadObject(g_waterDropObject);
+        g_waterDropObject = nullptr;
     }
     
     if (g_terrainProbe) {
@@ -961,35 +976,35 @@ static bool LoadFireTruckModel() {
 }
 
 /*
- * LoadWaterJetModel - Load the water jet OBJ file with particle system
+ * LoadWaterDropModel - Load the water droplet OBJ file for particle instances
  */
-static bool LoadWaterJetModel() {
-    /* Build path to water jet model */
+static bool LoadWaterDropModel() {
+    /* Build path to water droplet model */
     char modelPath[1024];
-    snprintf(modelPath, sizeof(modelPath), "%s/waterjet.obj", g_resourcePath);
+    snprintf(modelPath, sizeof(modelPath), "%s/waterdrop.obj", g_resourcePath);
     
-    DebugLog("Loading water jet model from: %s", modelPath);
+    DebugLog("Loading water droplet model from: %s", modelPath);
     
     /* Check if file exists by trying to open it */
     FILE* testFile = fopen(modelPath, "r");
     if (testFile) {
         fclose(testFile);
-        DebugLog("Water jet model file exists and is readable");
+        DebugLog("Water droplet model file exists and is readable");
     } else {
         int savedErrno = errno;
-        DebugLog("WARNING: Cannot open water jet model file");
+        DebugLog("WARNING: Cannot open water droplet model file");
         DebugLog("  Error: %s (errno=%d)", strerror(savedErrno), savedErrno);
     }
     
-    g_waterJetObject = XPLMLoadObject(modelPath);
+    g_waterDropObject = XPLMLoadObject(modelPath);
     
-    if (!g_waterJetObject) {
-        DebugLog("ERROR: Failed to load water jet model!");
-        DebugLog("  Water jets will not be visible");
+    if (!g_waterDropObject) {
+        DebugLog("ERROR: Failed to load water droplet model!");
+        DebugLog("  Water particles will not be visible");
         return false;
     }
     
-    DebugLog("Water jet model loaded successfully (handle: %p)", (void*)g_waterJetObject);
+    DebugLog("Water droplet model loaded successfully (handle: %p)", (void*)g_waterDropObject);
     return true;
 }
 
@@ -1030,6 +1045,7 @@ static void StartWaterSalute() {
     
     /* Reset debug counters */
     g_drawCallbackCallCount = 0;
+    g_particlesEmittedTotal = 0;
     g_debugLogTimer = 0.0f;
     
     if (g_state != STATE_IDLE) {
@@ -1268,13 +1284,11 @@ static void StopWaterSalute() {
     DebugLog("StopWaterSalute called, current state: %d", g_state);
     
     if (g_state == STATE_WATER_SPRAYING) {
-        DestroyWaterJetInstances();
         UnregisterDrawCallback();
         g_state = STATE_TRUCKS_LEAVING;
         DebugLog("Stopping water and trucks leaving");
     } else if (g_state != STATE_IDLE) {
         /* Immediate cleanup for other states */
-        DestroyWaterJetInstances();
         CleanupTruck(g_leftTruck);
         CleanupTruck(g_rightTruck);
         UnregisterDrawCallback();
@@ -1290,12 +1304,14 @@ static void StopWaterSalute() {
  */
 static void InitializeTruck(FireTruck& truck) {
     truck.instance = nullptr;
-    truck.waterJetInstance = nullptr;
     truck.x = truck.y = truck.z = 0.0;
     truck.heading = 0.0f;
     truck.targetX = truck.targetZ = 0.0f;
     truck.targetHeading = 0.0f;
     truck.positioned = false;
+    truck.particles.clear();
+    truck.particles.reserve(NUM_PARTICLES_PER_JET);
+    truck.lastEmitTime = 0.0f;
     /* Initialize wheel and steering control properties */
     truck.frontSteeringAngle = 0.0f;  /* Front axles steering (negative = left turn) */
     truck.rearSteeringAngle = 0.0f;   /* Rear axle steering (opposite sign to front for counter-steering) */
@@ -1313,10 +1329,14 @@ static void CleanupTruck(FireTruck& truck) {
         XPLMDestroyInstance(truck.instance);
         truck.instance = nullptr;
     }
-    if (truck.waterJetInstance) {
-        XPLMDestroyInstance(truck.waterJetInstance);
-        truck.waterJetInstance = nullptr;
+    /* Clean up all particle instances */
+    for (auto& particle : truck.particles) {
+        if (particle.instance) {
+            XPLMDestroyInstance(particle.instance);
+            particle.instance = nullptr;
+        }
     }
+    truck.particles.clear();
 }
 
 /*
@@ -1364,7 +1384,7 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
     UpdateTrucks(dt);
     
     if (g_state == STATE_WATER_SPRAYING) {
-        UpdateWaterJets(dt);
+        UpdateWaterParticles(dt);
     }
     
     return -1.0f; /* Run every frame */
@@ -1558,10 +1578,9 @@ static void UpdateTrucks(float dt) {
                 DebugLog("Right truck final pos: (%.2f, %.2f, %.2f), heading: %.1f",
                          g_rightTruck.x, g_rightTruck.y, g_rightTruck.z, g_rightTruck.heading);
                 g_state = STATE_WATER_SPRAYING;
-                CreateWaterJetInstances();
                 RegisterDrawCallback();
                 UpdateMenuState();
-                DebugLog("Water jet instances created, water spray starting");
+                DebugLog("Draw callback registered, water spray starting");
                 DebugLog("========================================");
             } else if (g_state == STATE_TRUCKS_APPROACHING) {
                 /* Check if close enough to start positioning */
@@ -1581,8 +1600,21 @@ static void UpdateTrucks(float dt) {
             bool leftGone = updateTruckLeaving(g_leftTruck);
             bool rightGone = updateTruckLeaving(g_rightTruck);
             
-            /* Destroy water jet instances when leaving */
-            DestroyWaterJetInstances();
+            /* Destroy particle instances before clearing (prevent memory leak) */
+            for (auto& particle : g_leftTruck.particles) {
+                if (particle.instance) {
+                    XPLMDestroyInstance(particle.instance);
+                    particle.instance = nullptr;
+                }
+            }
+            for (auto& particle : g_rightTruck.particles) {
+                if (particle.instance) {
+                    XPLMDestroyInstance(particle.instance);
+                    particle.instance = nullptr;
+                }
+            }
+            g_leftTruck.particles.clear();
+            g_rightTruck.particles.clear();
             
             if (leftGone && rightGone) {
                 DebugLog("STATE TRANSITION: TRUCKS_LEAVING -> IDLE");
@@ -1602,58 +1634,80 @@ static void UpdateTrucks(float dt) {
 }
 
 /*
- * CreateWaterJetInstances - Create water jet particle system instances for both trucks
+ * UpdateWaterParticles - Update and emit water particles
  */
-static void CreateWaterJetInstances() {
-    if (!g_waterJetObject) {
-        DebugLog("ERROR: Cannot create water jet instances - water jet object not loaded");
-        return;
-    }
+static void UpdateWaterParticles(float dt) {
+    static float totalTime = 0.0f;
+    totalTime += dt;
     
-    /* Create water jet instance for left truck */
-    if (!g_leftTruck.waterJetInstance) {
-        g_leftTruck.waterJetInstance = XPLMCreateInstance(g_waterJetObject, g_noDataRefs);
-        if (g_leftTruck.waterJetInstance) {
-            DebugLog("Left truck water jet instance created");
-        } else {
-            DebugLog("ERROR: Failed to create left truck water jet instance");
+    auto updateParticles = [dt](FireTruck& truck, float currentTime, float /* targetX */, float /* targetZ */) {
+        /* Emit new particles */
+        if (currentTime - truck.lastEmitTime >= PARTICLE_EMIT_RATE) {
+            truck.lastEmitTime = currentTime;
+            EmitParticle(truck);
         }
-    }
+        
+        /* Update existing particles */
+        for (auto& particle : truck.particles) {
+            if (!particle.active) continue;
+            
+            /* Apply gravity */
+            particle.vy -= 9.8f * dt;
+            
+            /* Update position */
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.z += particle.vz * dt;
+            
+            /* Update instance position if it exists */
+            if (particle.instance) {
+                XPLMDrawInfo_t drawInfo;
+                drawInfo.structSize = sizeof(XPLMDrawInfo_t);
+                drawInfo.x = particle.x;
+                drawInfo.y = particle.y;
+                drawInfo.z = particle.z;
+                drawInfo.pitch = 0.0f;
+                drawInfo.heading = 0.0f;
+                drawInfo.roll = 0.0f;
+                XPLMInstanceSetPosition(particle.instance, &drawInfo, nullptr);
+            }
+            
+            /* Update lifetime */
+            particle.lifetime -= dt;
+            
+            /* Check if particle should deactivate */
+            if (particle.lifetime <= 0.0f || particle.y < GetTerrainHeight(particle.x, particle.z)) {
+                particle.active = false;
+                /* Destroy the instance when particle becomes inactive */
+                if (particle.instance) {
+                    XPLMDestroyInstance(particle.instance);
+                    particle.instance = nullptr;
+                }
+            }
+        }
+        
+        /* Remove inactive particles (compact the vector) */
+        truck.particles.erase(
+            std::remove_if(truck.particles.begin(), truck.particles.end(),
+                          [](const WaterParticle& p) { return !p.active; }),
+            truck.particles.end()
+        );
+    };
     
-    /* Create water jet instance for right truck */
-    if (!g_rightTruck.waterJetInstance) {
-        g_rightTruck.waterJetInstance = XPLMCreateInstance(g_waterJetObject, g_noDataRefs);
-        if (g_rightTruck.waterJetInstance) {
-            DebugLog("Right truck water jet instance created");
-        } else {
-            DebugLog("ERROR: Failed to create right truck water jet instance");
-        }
-    }
+    /* Get center point (between trucks) for targeting */
+    float centerX = (static_cast<float>(g_leftTruck.x) + static_cast<float>(g_rightTruck.x)) / 2.0f;
+    float centerZ = (static_cast<float>(g_leftTruck.z) + static_cast<float>(g_rightTruck.z)) / 2.0f;
+    
+    updateParticles(g_leftTruck, totalTime, centerX, centerZ);
+    updateParticles(g_rightTruck, totalTime, centerX, centerZ);
 }
 
 /*
- * DestroyWaterJetInstances - Destroy water jet instances for both trucks
+ * EmitParticle - Emit a new water particle from a truck
  */
-static void DestroyWaterJetInstances() {
-    if (g_leftTruck.waterJetInstance) {
-        XPLMDestroyInstance(g_leftTruck.waterJetInstance);
-        g_leftTruck.waterJetInstance = nullptr;
-        DebugLog("Left truck water jet instance destroyed");
-    }
-    if (g_rightTruck.waterJetInstance) {
-        XPLMDestroyInstance(g_rightTruck.waterJetInstance);
-        g_rightTruck.waterJetInstance = nullptr;
-        DebugLog("Right truck water jet instance destroyed");
-    }
-}
-
-/*
- * UpdateWaterJetPosition - Update the position and orientation of a water jet instance
- * @param truck Reference to the truck
- * @param isLeftTruck True if this is the left truck (affects yaw direction)
- */
-static void UpdateWaterJetPosition(FireTruck& truck, bool isLeftTruck) {
-    if (!truck.waterJetInstance) {
+static void EmitParticle(FireTruck& truck) {
+    if (truck.particles.size() >= static_cast<size_t>(NUM_PARTICLES_PER_JET)) {
+        DebugLogVerbose("Particle limit reached for truck (%zu/%d)", truck.particles.size(), NUM_PARTICLES_PER_JET);
         return;
     }
     
@@ -1673,71 +1727,103 @@ static void UpdateWaterJetPosition(FireTruck& truck, bool isLeftTruck) {
     float nozzleY = static_cast<float>(truck.y) + truck.nozzleOffsetY;
     float nozzleZ = static_cast<float>(truck.z) + truck.nozzleOffsetX * sinH + truck.nozzleOffsetZ * (-cosH);
     
-    /* Calculate water jet heading to aim toward center
-     * Left truck should aim to the right (positive yaw offset)
-     * Right truck should aim to the left (negative yaw offset)
-     */
-    float jetHeading = truck.heading + truck.cannonYaw;
+    /* Calculate target point (center between trucks, at height) */
+    float centerX = (static_cast<float>(g_leftTruck.x) + static_cast<float>(g_rightTruck.x)) / 2.0f;
+    float centerZ = (static_cast<float>(g_leftTruck.z) + static_cast<float>(g_rightTruck.z)) / 2.0f;
+    float centerY = static_cast<float>(truck.y) + WATER_JET_HEIGHT;
     
-    /* The PSS INITIAL_PITCH in the file sets the base pitch angle (45-50 degrees)
-     * We can adjust the pitch here if needed by adding truck.cannonPitch offset
-     * For now, the OBJ orientation handles the pitch through its EMITTER direction
-     */
-    float jetPitch = truck.cannonPitch - DEFAULT_CANNON_PITCH; /* Offset from default */
+    /* Calculate direction to center/top of arc */
+    float dx = centerX - nozzleX;
+    float dz = centerZ - nozzleZ;
+    float dist = sqrtf(dx * dx + dz * dz);
     
-    /* Position the water jet instance */
-    XPLMDrawInfo_t drawInfo;
-    drawInfo.structSize = sizeof(XPLMDrawInfo_t);
-    drawInfo.x = nozzleX;
-    drawInfo.y = nozzleY;
-    drawInfo.z = nozzleZ;
-    drawInfo.pitch = jetPitch;
-    drawInfo.heading = jetHeading;
-    drawInfo.roll = 0.0f;
+    /* Calculate initial velocity for parabolic arc */
+    float t = WATER_JET_DURATION;
+    float vx = dx / (2.0f * t);
+    float vz = dz / (2.0f * t);
+    float vy = (centerY - nozzleY + 0.5f * 9.8f * t * t) / t;
     
-    XPLMInstanceSetPosition(truck.waterJetInstance, &drawInfo, nullptr);
+    /* Add some randomness */
+    float randScale = 0.1f;
+    vx += (static_cast<float>(rand()) / RAND_MAX - 0.5f) * randScale * dist;
+    vz += (static_cast<float>(rand()) / RAND_MAX - 0.5f) * randScale * dist;
+    vy += (static_cast<float>(rand()) / RAND_MAX - 0.5f) * randScale * 5.0f;
     
-    /* Log first update for debugging */
-    static bool firstUpdateLogged = false;
-    if (!firstUpdateLogged) {
-        DebugLog("Water jet position updated:");
-        DebugLog("  %s truck nozzle: (%.2f, %.2f, %.2f)", isLeftTruck ? "Left" : "Right", nozzleX, nozzleY, nozzleZ);
-        DebugLog("  Heading: %.1f, Pitch: %.1f", jetHeading, jetPitch);
-        firstUpdateLogged = true;
+    /* Create particle */
+    WaterParticle particle;
+    particle.x = nozzleX;
+    particle.y = nozzleY;
+    particle.z = nozzleZ;
+    particle.vx = vx;
+    particle.vy = vy;
+    particle.vz = vz;
+    particle.lifetime = PARTICLE_LIFETIME;
+    particle.maxLifetime = PARTICLE_LIFETIME;
+    particle.active = true;
+    particle.instance = nullptr;
+    
+    /* Create instance for this particle if water drop model is loaded */
+    if (g_waterDropObject) {
+        particle.instance = XPLMCreateInstance(g_waterDropObject, g_noDataRefs);
+        
+        if (particle.instance) {
+            /* Set initial position */
+            XPLMDrawInfo_t drawInfo;
+            drawInfo.structSize = sizeof(XPLMDrawInfo_t);
+            drawInfo.x = particle.x;
+            drawInfo.y = particle.y;
+            drawInfo.z = particle.z;
+            drawInfo.pitch = 0.0f;
+            drawInfo.heading = 0.0f;
+            drawInfo.roll = 0.0f;
+            XPLMInstanceSetPosition(particle.instance, &drawInfo, nullptr);
+        } else {
+            /* Log instance creation failure (only once to avoid log spam) */
+            static bool instanceFailureLogged = false;
+            if (!instanceFailureLogged) {
+                DebugLog("WARNING: Failed to create water particle instance");
+                DebugLog("  Water droplet model handle: %p", (void*)g_waterDropObject);
+                instanceFailureLogged = true;
+            }
+        }
+    }
+    
+    truck.particles.push_back(particle);
+    g_particlesEmittedTotal++;
+    
+    /* Log first particle emission for debugging */
+    if (g_particlesEmittedTotal == 1) {
+        DebugLog("First particle emitted:");
+        DebugLog("  Nozzle pos: (%.2f, %.2f, %.2f)", nozzleX, nozzleY, nozzleZ);
+        DebugLog("  Target center: (%.2f, %.2f, %.2f)", centerX, centerY, centerZ);
+        DebugLog("  Velocity: (%.2f, %.2f, %.2f)", vx, vy, vz);
+        DebugLog("  Distance to center: %.2f", dist);
     }
 }
 
 /*
- * UpdateWaterJets - Update water jet positions
- */
-static void UpdateWaterJets(float /* dt */) {
-    UpdateWaterJetPosition(g_leftTruck, true);
-    UpdateWaterJetPosition(g_rightTruck, false);
-}
-
-/*
- * RegisterDrawCallback - Register the draw callback for water effects
- * Note: With PSS-based particle systems, the actual rendering is handled by X-Plane.
- * This callback is kept for debugging and statistics purposes.
+ * RegisterDrawCallback - Register the draw callback for water particles
+ * Note: With instance-based rendering, this callback is mainly for debugging.
+ * The actual rendering is handled by X-Plane's instance system.
  */
 static void RegisterDrawCallback() {
     if (!g_drawCallbackRegistered) {
-        int result = XPLMRegisterDrawCallback(DrawWaterCallback, WATER_DRAWING_PHASE, 0, nullptr);
+        int result = XPLMRegisterDrawCallback(DrawWaterParticles, WATER_DRAWING_PHASE, 0, nullptr);
         g_drawCallbackRegistered = true;
         g_drawCallbackCallCount = 0; /* Reset counter */
         DebugLog("Draw callback registered (result=%d)", result);
         DebugLog("  Drawing phase: xplm_Phase_Modern3D (%d)", WATER_DRAWING_PHASE);
-        DebugLog("  Using PSS particle system for water jets");
-        DebugLog("  Water jet object loaded: %s", g_waterJetObject ? "YES" : "NO");
+        DebugLog("  Water particles now use instance-based rendering");
+        DebugLog("  Water droplet model loaded: %s", g_waterDropObject ? "YES" : "NO");
     }
 }
 
 /*
- * UnregisterDrawCallback - Unregister the draw callback for water effects
+ * UnregisterDrawCallback - Unregister the draw callback for water particles
  */
 static void UnregisterDrawCallback() {
     if (g_drawCallbackRegistered) {
-        XPLMUnregisterDrawCallback(DrawWaterCallback, WATER_DRAWING_PHASE, 0, nullptr);
+        XPLMUnregisterDrawCallback(DrawWaterParticles, WATER_DRAWING_PHASE, 0, nullptr);
         g_drawCallbackRegistered = false;
         DebugLog("Draw callback unregistered");
         DebugLog("Final draw callback call count: %d", g_drawCallbackCallCount);
@@ -1745,13 +1831,13 @@ static void UnregisterDrawCallback() {
 }
 
 /* 
- * Draw callback for water effects
+ * Draw callback for rendering water particles
  * 
- * Note: With PSS-based particle systems in OBJ files, the actual rendering 
- * is handled by X-Plane's instance system. This callback is kept for 
- * debugging and statistics purposes only.
+ * Note: With instance-based rendering, the actual particle rendering is handled
+ * by X-Plane's instance system (XPLMCreateInstance/XPLMInstanceSetPosition).
+ * This callback is kept for debugging and statistics purposes.
  */
-static int DrawWaterCallback(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon) {
+static int DrawWaterParticles(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon) {
     (void)inPhase;
     (void)inIsBefore;
     (void)inRefcon;
@@ -1760,23 +1846,44 @@ static int DrawWaterCallback(XPLMDrawingPhase inPhase, int inIsBefore, void* inR
     
     /* Log first callback and then periodically */
     if (g_drawCallbackCallCount == 1) {
-        DebugLog("DrawWaterCallback first invocation");
+        DebugLog("DrawWaterParticles callback first invocation");
         DebugLog("  Phase: %d, IsBefore: %d", inPhase, inIsBefore);
-        DebugLog("  Using PSS-based particle system for water jets");
+        DebugLog("  Using instance-based rendering for water particles");
     }
     
     if (g_state != STATE_WATER_SPRAYING) {
         if (g_drawCallbackCallCount <= 5) {
-            DebugLog("DrawWaterCallback: State is not WATER_SPRAYING (state=%s)", GetStateName(g_state));
+            DebugLog("DrawWaterParticles: State is not WATER_SPRAYING (state=%s)", GetStateName(g_state));
         }
         return 1;
     }
     
-    /* Periodic logging */
-    if (g_drawCallbackCallCount % 300 == 0) {
-        DebugLog("DrawWaterCallback stats (call #%d):", g_drawCallbackCallCount);
-        DebugLog("  Left water jet instance: %s", g_leftTruck.waterJetInstance ? "ACTIVE" : "NULL");
-        DebugLog("  Right water jet instance: %s", g_rightTruck.waterJetInstance ? "ACTIVE" : "NULL");
+    /* Count active particles for debugging */
+    int leftActiveCount = 0;
+    int rightActiveCount = 0;
+    int leftInstanceCount = 0;
+    int rightInstanceCount = 0;
+    
+    /* Count particles and instances */
+    for (const auto& particle : g_leftTruck.particles) {
+        if (particle.active) {
+            leftActiveCount++;
+            if (particle.instance) leftInstanceCount++;
+        }
+    }
+    for (const auto& particle : g_rightTruck.particles) {
+        if (particle.active) {
+            rightActiveCount++;
+            if (particle.instance) rightInstanceCount++;
+        }
+    }
+    
+    /* Periodic logging of particle counts */
+    if (g_drawCallbackCallCount % 100 == 0) {
+        DebugLog("DrawWaterParticles stats (call #%d):", g_drawCallbackCallCount);
+        DebugLog("  Left truck: %d particles, %d instances", leftActiveCount, leftInstanceCount);
+        DebugLog("  Right truck: %d particles, %d instances", rightActiveCount, rightInstanceCount);
+        DebugLog("  Total particles emitted: %d", g_particlesEmittedTotal);
     }
     
     return 1;

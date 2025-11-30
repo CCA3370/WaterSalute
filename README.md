@@ -8,17 +8,6 @@ X-Plane 12 插件，模拟飞机过水门仪式。两辆消防车驶向飞机并
 - 自动检查飞机在地面且速度 < 40 节
 - 消防车根据飞机翼展自动定位
 - 8x8 消防车物理转向模型
-- 基于 PSS 粒子系统的水柱效果（参考 X-Plane 原生地景喷泉实现）
-
-## 水柱系统
-
-水柱效果使用 X-Plane 原生的 PSS（Particle System Script）粒子系统实现，类似于地景中的喷泉效果：
-
-- `waterjet.pss` - 粒子系统定义文件，定义水滴粒子的行为参数
-- `waterjet.obj` - OBJ 文件，包含 EMITTER 和 PARTICLE_SYSTEM 命令
-- `water.png` - 8x8 精灵图纹理，用于水滴动画
-
-粒子系统由 X-Plane 引擎原生渲染，性能更好，效果更逼真。
 
 ## 安装
 
