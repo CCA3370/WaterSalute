@@ -33,29 +33,14 @@ jobs:
 
       - name: Configure CMake (Unix)
         if: runner.os != 'Windows'
-        run: |
-          mkdir build
-          cd build
-          cmake ..
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Configure CMake (Windows)
         if: runner.os == 'Windows'
-        run: |
-          mkdir build
-          cd build
-          cmake -G "Visual Studio 17 2022" -A x64 ..
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64
 
-      - name: Build (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          cd build
-          make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
-
-      - name: Build (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          cd build
-          cmake --build . --config Release
+      - name: Build
+        run: cmake --build build --config Release --parallel
 
       - name: Upload plugin binary
         uses: actions/upload-artifact@v4
@@ -71,39 +56,29 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: WaterSalute-*
+          path: artifacts
+
       - name: Create package structure
         run: |
-          mkdir -p WaterSalute/resources
-          mkdir -p WaterSalute/lin_x64
-          mkdir -p WaterSalute/win_x64
-          mkdir -p WaterSalute/mac_x64
-
-      - name: Download Linux artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: WaterSalute-lin_x64
-          path: WaterSalute/lin_x64
-
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: WaterSalute-win_x64
-          path: WaterSalute/win_x64
-
-      - name: Download macOS artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: WaterSalute-mac_x64
-          path: WaterSalute/mac_x64
-
-      - name: Copy resources and documentation
-        run: |
-          cp -r resources/. WaterSalute/resources/
-          cp LICENSE WaterSalute/LICENSE.txt
-          cp README.txt WaterSalute/README.txt
+          mkdir -p package/WaterSalute/resources
+          mkdir -p package/WaterSalute/lin_x64
+          mkdir -p package/WaterSalute/win_x64
+          mkdir -p package/WaterSalute/mac_x64
+          
+          cp artifacts/WaterSalute-lin_x64/WaterSalute.xpl package/WaterSalute/lin_x64/
+          cp artifacts/WaterSalute-win_x64/WaterSalute.xpl package/WaterSalute/win_x64/
+          cp artifacts/WaterSalute-mac_x64/WaterSalute.xpl package/WaterSalute/mac_x64/
+          
+          cp -r resources/. package/WaterSalute/resources/
+          cp LICENSE package/WaterSalute/LICENSE.txt
+          cp README.txt package/WaterSalute/README.txt
 
       - name: Upload combined artifact
         uses: actions/upload-artifact@v4
         with:
           name: WaterSalute
-          path: WaterSalute/
+          path: package/
