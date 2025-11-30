@@ -19,6 +19,7 @@
 #include <cstring>
 #include <cmath>
 #include <cstdarg>
+#include <cerrno>
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -48,8 +49,14 @@ static const float PARTICLE_EMIT_RATE = 0.02f;     /* Time between particle emis
 static const XPLMDrawingPhase WATER_DRAWING_PHASE = xplm_Phase_Modern3D; /* Drawing phase for water particles */
 
 /* Debug configuration */
-static const bool DEBUG_VERBOSE = true;            /* Enable verbose debug logging */
+#ifndef WATERSALUTE_DEBUG_VERBOSE
+static const bool DEBUG_VERBOSE = false;           /* Enable verbose debug logging (set to true for debugging) */
+#else
+static const bool DEBUG_VERBOSE = true;            /* Verbose logging enabled via build flag */
+#endif
 static const float DEBUG_LOG_INTERVAL = 2.0f;      /* Interval for periodic debug logs (seconds) */
+static const size_t DEBUG_BUFFER_SIZE = 1024;      /* Buffer size for debug message formatting */
+static const size_t DEBUG_LOG_MSG_SIZE = DEBUG_BUFFER_SIZE + 80; /* Buffer for final log message with prefix */
 
 /* Plugin state */
 enum PluginState {
@@ -132,13 +139,13 @@ static void UnregisterDrawCallback();
 
 /* Debug logging */
 static void DebugLog(const char* format, ...) {
-    char buffer[1024];
+    char buffer[DEBUG_BUFFER_SIZE];
     va_list args;
     va_start(args, format);
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
     
-    char logMsg[1100];
+    char logMsg[DEBUG_LOG_MSG_SIZE];
     snprintf(logMsg, sizeof(logMsg), "WaterSalute: %s\n", buffer);
     XPLMDebugString(logMsg);
 }
@@ -159,13 +166,13 @@ static const char* GetStateName(PluginState state) {
 static void DebugLogVerbose(const char* format, ...) {
     if (!DEBUG_VERBOSE) return;
     
-    char buffer[1024];
+    char buffer[DEBUG_BUFFER_SIZE];
     va_list args;
     va_start(args, format);
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
     
-    char logMsg[1100];
+    char logMsg[DEBUG_LOG_MSG_SIZE];
     snprintf(logMsg, sizeof(logMsg), "WaterSalute [VERBOSE]: %s\n", buffer);
     XPLMDebugString(logMsg);
 }
@@ -336,7 +343,9 @@ static bool LoadFireTruckModel() {
         fclose(testFile);
         DebugLog("Model file exists and is readable");
     } else {
-        DebugLog("WARNING: Cannot open model file - errno may indicate cause");
+        int savedErrno = errno;
+        DebugLog("WARNING: Cannot open model file");
+        DebugLog("  Error: %s (errno=%d)", strerror(savedErrno), savedErrno);
     }
     
     g_truckObject = XPLMLoadObject(modelPath);
