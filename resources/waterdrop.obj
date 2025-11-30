@@ -13,14 +13,14 @@ TEXTURE water.png
 POINT_COUNTS 4 0 0 6
 
 # 4 vertices for a quad (billboard-style)
-# Using texture coordinates for center sprite cell for better water appearance
-# Maps to a 128x128 region in the center of the 1024x1024 texture
-# UV coordinates: (0.4375, 0.4375) to (0.5625, 0.5625) - center region
+# Using texture coordinates for a 64x64 blue water region in the texture
+# Maps to a fully filled blue water region (100% non-transparent, RGB 122,122,255)
+# UV coordinates: (0.3994, 0.9102) to (0.4619, 0.9727) - blue water region
 # Format: VT x y z nx ny nz s t
-VT -0.75  0.75  0.0   0.0  0.0  1.0   0.4375  0.4375
-VT  0.75  0.75  0.0   0.0  0.0  1.0   0.5625  0.4375
-VT  0.75 -0.75  0.0   0.0  0.0  1.0   0.5625  0.5625
-VT -0.75 -0.75  0.0   0.0  0.0  1.0   0.4375  0.5625
+VT -0.75  0.75  0.0   0.0  0.0  1.0   0.3994  0.9102
+VT  0.75  0.75  0.0   0.0  0.0  1.0   0.4619  0.9102
+VT  0.75 -0.75  0.0   0.0  0.0  1.0   0.4619  0.9727
+VT -0.75 -0.75  0.0   0.0  0.0  1.0   0.3994  0.9727
 
 # 2 triangles = 6 indices for the quad
 IDX 0
