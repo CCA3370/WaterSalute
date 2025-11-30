@@ -41,6 +41,7 @@ static const float MAX_GROUND_SPEED_KNOTS = 40.0f; /* Maximum ground speed for w
 static const float TRUCK_APPROACH_SPEED = 15.0f;   /* Fire truck approach speed in m/s */
 static const float TRUCK_STOP_DISTANCE = 200.0f;   /* Distance in front of aircraft to stop (meters) */
 static const float TRUCK_EXTRA_SPACING = 40.0f;    /* Extra spacing beyond wingspan (meters) */
+static const float TRUCK_POSITIONING_THRESHOLD = 50.0f; /* Distance threshold to start positioning phase (meters) */
 static const float WATER_JET_HEIGHT = 25.0f;       /* Maximum height of water arch (meters) */
 static const float WATER_JET_DURATION = 0.5f;      /* Time for particle to reach apex */
 static const float PARTICLE_LIFETIME = 2.0f;       /* Particle lifetime in seconds */
@@ -56,7 +57,8 @@ static const bool DEBUG_VERBOSE = true;            /* Verbose logging enabled vi
 #endif
 static const float DEBUG_LOG_INTERVAL = 2.0f;      /* Interval for periodic debug logs (seconds) */
 static const size_t DEBUG_BUFFER_SIZE = 1024;      /* Buffer size for debug message formatting */
-static const size_t DEBUG_LOG_MSG_SIZE = DEBUG_BUFFER_SIZE + 80; /* Buffer for final log message with prefix */
+static const size_t DEBUG_LOG_PREFIX_SIZE = 32;    /* Max size of log prefix "WaterSalute [VERBOSE]: " */
+static const size_t DEBUG_LOG_MSG_SIZE = DEBUG_BUFFER_SIZE + DEBUG_LOG_PREFIX_SIZE + 2; /* +2 for newline and null terminator */
 
 /* Plugin state */
 enum PluginState {
@@ -869,9 +871,9 @@ static void UpdateTrucks(float dt) {
                 float dx = g_leftTruck.targetX - static_cast<float>(g_leftTruck.x);
                 float dz = g_leftTruck.targetZ - static_cast<float>(g_leftTruck.z);
                 float dist = sqrtf(dx * dx + dz * dz);
-                if (dist < 50.0f) {
+                if (dist < TRUCK_POSITIONING_THRESHOLD) {
                     DebugLog("STATE TRANSITION: TRUCKS_APPROACHING -> TRUCKS_POSITIONING");
-                    DebugLog("Trucks are within 50m of target, beginning positioning phase");
+                    DebugLog("Trucks are within %.0fm of target, beginning positioning phase", TRUCK_POSITIONING_THRESHOLD);
                     g_state = STATE_TRUCKS_POSITIONING;
                 }
             }
@@ -882,7 +884,19 @@ static void UpdateTrucks(float dt) {
             bool leftGone = updateTruckLeaving(g_leftTruck);
             bool rightGone = updateTruckLeaving(g_rightTruck);
             
-            /* Clear particles */
+            /* Destroy particle instances before clearing (prevent memory leak) */
+            for (auto& particle : g_leftTruck.particles) {
+                if (particle.instance) {
+                    XPLMDestroyInstance(particle.instance);
+                    particle.instance = nullptr;
+                }
+            }
+            for (auto& particle : g_rightTruck.particles) {
+                if (particle.instance) {
+                    XPLMDestroyInstance(particle.instance);
+                    particle.instance = nullptr;
+                }
+            }
             g_leftTruck.particles.clear();
             g_rightTruck.particles.clear();
             
@@ -1040,6 +1054,14 @@ static void EmitParticle(FireTruck& truck) {
             drawInfo.heading = 0.0f;
             drawInfo.roll = 0.0f;
             XPLMInstanceSetPosition(particle.instance, &drawInfo, nullptr);
+        } else {
+            /* Log instance creation failure (only once to avoid log spam) */
+            static bool instanceFailureLogged = false;
+            if (!instanceFailureLogged) {
+                DebugLog("WARNING: Failed to create water particle instance");
+                DebugLog("  Water droplet model handle: %p", (void*)g_waterDropObject);
+                instanceFailureLogged = true;
+            }
         }
     }
     
