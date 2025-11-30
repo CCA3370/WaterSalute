@@ -30,7 +30,11 @@ extern "C" {
 
 /* Calling conventions */
 #if IBM
-    #define XPLM_API __declspec(dllexport)
+    #ifdef XPLM_BUILDING
+        #define XPLM_API __declspec(dllexport)
+    #else
+        #define XPLM_API __declspec(dllimport)
+    #endif
 #else
     #define XPLM_API __attribute__((visibility("default")))
 #endif

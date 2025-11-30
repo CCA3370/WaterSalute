@@ -12,6 +12,11 @@ set(SOURCES
     src/WaterSalute.cpp
 )
 
+# Add Windows stub file for linking
+if(WIN32)
+    list(APPEND SOURCES src/XPLMStubs.cpp)
+endif()
+
 # Platform detection
 if(WIN32)
     set(XPLM_PLATFORM "Windows")
