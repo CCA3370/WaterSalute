@@ -120,6 +120,7 @@ static XPLMDataRef g_drHeading = nullptr;
 static XPLMDataRef g_drWingspan = nullptr;
 
 static char g_pluginPath[512];
+static char g_resourcePath[512];  /* Path to resources directory */
 static float g_debugLogTimer = 0.0f;               /* Timer for periodic debug logging */
 static int g_drawCallbackCallCount = 0;            /* Counter for draw callback calls */
 static int g_particlesEmittedTotal = 0;            /* Total particles emitted */
@@ -139,6 +140,7 @@ static void UpdateMenuState();
 static float GetTerrainHeight(float x, float z);
 static void InitializeTruck(FireTruck& truck);
 static void CleanupTruck(FireTruck& truck);
+static bool FindResourcePath();
 static bool LoadFireTruckModel();
 static bool LoadWaterDropModel();
 static int DrawWaterParticles(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon);
@@ -222,6 +224,10 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     if (lastSlash) *lastSlash = '\0';
     
     DebugLog("Plugin starting...");
+    DebugLog("Plugin directory: %s", g_pluginPath);
+    
+    /* Find the resources directory (handles different plugin layouts) */
+    FindResourcePath();
     
     /* Initialize datarefs */
     g_drOnGround = XPLMFindDataRef("sim/flightmodel/failures/onground_any");
@@ -343,15 +349,91 @@ PLUGIN_API void XPluginReceiveMessage(XPLMPluginID inFrom, int inMsg, void* inPa
 }
 
 /*
+ * FindResourcePath - Find the resources directory
+ * 
+ * X-Plane plugins can be installed in different directory structures:
+ * 1. Flat: WaterSalute/WaterSalute.xpl with resources at WaterSalute/resources/
+ * 2. Platform-specific: WaterSalute/win_64/WaterSalute.xpl (or mac_x64/, lin_x64/)
+ *    with resources at WaterSalute/resources/
+ * 
+ * This function tries both layouts and sets g_resourcePath to the correct path.
+ */
+static bool FindResourcePath() {
+    char testPath[1024];
+    FILE* testFile = nullptr;
+    
+    /* First, try the direct path (resources in same directory as plugin) */
+    snprintf(testPath, sizeof(testPath), "%s/resources/firetruck.obj", g_pluginPath);
+    DebugLog("Trying resource path 1: %s", testPath);
+    
+    testFile = fopen(testPath, "r");
+    if (testFile) {
+        fclose(testFile);
+        snprintf(g_resourcePath, sizeof(g_resourcePath), "%s/resources", g_pluginPath);
+        DebugLog("Found resources at: %s", g_resourcePath);
+        return true;
+    }
+    
+    /* Second, try parent directory (for platform-specific subdirectory layout) */
+    /* Use snprintf for safer string copying */
+    char parentPath[512];
+    snprintf(parentPath, sizeof(parentPath), "%s", g_pluginPath);
+    
+    char* lastSlash = strrchr(parentPath, '/');
+    if (!lastSlash) lastSlash = strrchr(parentPath, '\\');
+    if (lastSlash) {
+        *lastSlash = '\0';
+        
+        snprintf(testPath, sizeof(testPath), "%s/resources/firetruck.obj", parentPath);
+        DebugLog("Trying resource path 2: %s", testPath);
+        
+        testFile = fopen(testPath, "r");
+        if (testFile) {
+            fclose(testFile);
+            snprintf(g_resourcePath, sizeof(g_resourcePath), "%s/resources", parentPath);
+            DebugLog("Found resources at: %s", g_resourcePath);
+            return true;
+        }
+        
+        /* Third, try going up two directories (for deeply nested structures) */
+        /* Only attempt if previous directory traversal was successful */
+        char* secondLastSlash = strrchr(parentPath, '/');
+        if (!secondLastSlash) secondLastSlash = strrchr(parentPath, '\\');
+        if (secondLastSlash) {
+            *secondLastSlash = '\0';
+            
+            snprintf(testPath, sizeof(testPath), "%s/resources/firetruck.obj", parentPath);
+            DebugLog("Trying resource path 3: %s", testPath);
+            
+            testFile = fopen(testPath, "r");
+            if (testFile) {
+                fclose(testFile);
+                snprintf(g_resourcePath, sizeof(g_resourcePath), "%s/resources", parentPath);
+                DebugLog("Found resources at: %s", g_resourcePath);
+                return true;
+            }
+        }
+    }
+    
+    DebugLog("ERROR: Could not find resources directory!");
+    DebugLog("  Searched in plugin path and parent directories");
+    DebugLog("  Make sure 'resources/firetruck.obj' exists relative to plugin location");
+    
+    /* Fallback to default (will likely fail, but provides debug info) */
+    snprintf(g_resourcePath, sizeof(g_resourcePath), "%s/resources", g_pluginPath);
+    return false;
+}
+
+/*
  * LoadFireTruckModel - Load the fire truck OBJ file
  */
 static bool LoadFireTruckModel() {
     /* Build path to fire truck model */
     char modelPath[1024];
-    snprintf(modelPath, sizeof(modelPath), "%s/resources/firetruck.obj", g_pluginPath);
+    snprintf(modelPath, sizeof(modelPath), "%s/firetruck.obj", g_resourcePath);
     
     DebugLog("Loading fire truck model from: %s", modelPath);
-    DebugLog("Plugin path base: %s", g_pluginPath);
+    DebugLog("Resource path base: %s", g_resourcePath);
     
     /* Check if file exists by trying to open it */
     FILE* testFile = fopen(modelPath, "r");
@@ -386,7 +468,7 @@ static bool LoadFireTruckModel() {
 static bool LoadWaterDropModel() {
     /* Build path to water droplet model */
     char modelPath[1024];
-    snprintf(modelPath, sizeof(modelPath), "%s/resources/waterdrop.obj", g_pluginPath);
+    snprintf(modelPath, sizeof(modelPath), "%s/waterdrop.obj", g_resourcePath);
     
     DebugLog("Loading water droplet model from: %s", modelPath);
     
