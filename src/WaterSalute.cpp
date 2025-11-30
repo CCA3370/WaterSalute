@@ -74,6 +74,7 @@ struct WaterParticle {
     float lifetime;          /* Remaining lifetime */
     float maxLifetime;       /* Original lifetime */
     bool active;
+    XPLMInstanceRef instance; /* Instance for rendering this particle */
 };
 
 /* Fire truck */
@@ -98,6 +99,7 @@ static int g_menuStartItem = -1;
 static int g_menuStopItem = -1;
 
 static XPLMObjectRef g_truckObject = nullptr;
+static XPLMObjectRef g_waterDropObject = nullptr;  /* Water droplet model for particle instances */
 static FireTruck g_leftTruck;
 static FireTruck g_rightTruck;
 static XPLMProbeRef g_terrainProbe = nullptr;
@@ -120,6 +122,9 @@ static float g_debugLogTimer = 0.0f;               /* Timer for periodic debug l
 static int g_drawCallbackCallCount = 0;            /* Counter for draw callback calls */
 static int g_particlesEmittedTotal = 0;            /* Total particles emitted */
 
+/* Static array for instance creation (no datarefs needed for water droplets) */
+static const char* g_noDataRefs[] = { nullptr };
+
 /* Forward declarations */
 static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTimeSinceLastFlightLoop, int inCounter, void* inRefcon);
 static void MenuHandler(void* inMenuRef, void* inItemRef);
@@ -133,6 +138,7 @@ static float GetTerrainHeight(float x, float z);
 static void InitializeTruck(FireTruck& truck);
 static void CleanupTruck(FireTruck& truck);
 static bool LoadFireTruckModel();
+static bool LoadWaterDropModel();
 static int DrawWaterParticles(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon);
 static void RegisterDrawCallback();
 static void UnregisterDrawCallback();
@@ -255,6 +261,9 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     /* Load fire truck model */
     LoadFireTruckModel();
     
+    /* Load water droplet model for particle rendering */
+    LoadWaterDropModel();
+    
     DebugLog("Plugin started successfully");
     
     return 1;
@@ -280,6 +289,11 @@ PLUGIN_API void XPluginStop(void) {
     if (g_truckObject) {
         XPLMUnloadObject(g_truckObject);
         g_truckObject = nullptr;
+    }
+    
+    if (g_waterDropObject) {
+        XPLMUnloadObject(g_waterDropObject);
+        g_waterDropObject = nullptr;
     }
     
     if (g_terrainProbe) {
@@ -361,6 +375,39 @@ static bool LoadFireTruckModel() {
     }
     
     DebugLog("Fire truck model loaded successfully (handle: %p)", (void*)g_truckObject);
+    return true;
+}
+
+/*
+ * LoadWaterDropModel - Load the water droplet OBJ file for particle instances
+ */
+static bool LoadWaterDropModel() {
+    /* Build path to water droplet model */
+    char modelPath[1024];
+    snprintf(modelPath, sizeof(modelPath), "%s/resources/waterdrop.obj", g_pluginPath);
+    
+    DebugLog("Loading water droplet model from: %s", modelPath);
+    
+    /* Check if file exists by trying to open it */
+    FILE* testFile = fopen(modelPath, "r");
+    if (testFile) {
+        fclose(testFile);
+        DebugLog("Water droplet model file exists and is readable");
+    } else {
+        int savedErrno = errno;
+        DebugLog("WARNING: Cannot open water droplet model file");
+        DebugLog("  Error: %s (errno=%d)", strerror(savedErrno), savedErrno);
+    }
+    
+    g_waterDropObject = XPLMLoadObject(modelPath);
+    
+    if (!g_waterDropObject) {
+        DebugLog("ERROR: Failed to load water droplet model!");
+        DebugLog("  Water particles will not be visible");
+        return false;
+    }
+    
+    DebugLog("Water droplet model loaded successfully (handle: %p)", (void*)g_waterDropObject);
     return true;
 }
 
@@ -634,6 +681,13 @@ static void CleanupTruck(FireTruck& truck) {
         XPLMDestroyInstance(truck.instance);
         truck.instance = nullptr;
     }
+    /* Clean up all particle instances */
+    for (auto& particle : truck.particles) {
+        if (particle.instance) {
+            XPLMDestroyInstance(particle.instance);
+            particle.instance = nullptr;
+        }
+    }
     truck.particles.clear();
 }
 
@@ -875,12 +929,30 @@ static void UpdateWaterParticles(float dt) {
             particle.y += particle.vy * dt;
             particle.z += particle.vz * dt;
             
+            /* Update instance position if it exists */
+            if (particle.instance) {
+                XPLMDrawInfo_t drawInfo;
+                drawInfo.structSize = sizeof(XPLMDrawInfo_t);
+                drawInfo.x = particle.x;
+                drawInfo.y = particle.y;
+                drawInfo.z = particle.z;
+                drawInfo.pitch = 0.0f;
+                drawInfo.heading = 0.0f;
+                drawInfo.roll = 0.0f;
+                XPLMInstanceSetPosition(particle.instance, &drawInfo, nullptr);
+            }
+            
             /* Update lifetime */
             particle.lifetime -= dt;
             
             /* Check if particle should deactivate */
             if (particle.lifetime <= 0.0f || particle.y < GetTerrainHeight(particle.x, particle.z)) {
                 particle.active = false;
+                /* Destroy the instance when particle becomes inactive */
+                if (particle.instance) {
+                    XPLMDestroyInstance(particle.instance);
+                    particle.instance = nullptr;
+                }
             }
         }
         
@@ -951,6 +1023,25 @@ static void EmitParticle(FireTruck& truck) {
     particle.lifetime = PARTICLE_LIFETIME;
     particle.maxLifetime = PARTICLE_LIFETIME;
     particle.active = true;
+    particle.instance = nullptr;
+    
+    /* Create instance for this particle if water drop model is loaded */
+    if (g_waterDropObject) {
+        particle.instance = XPLMCreateInstance(g_waterDropObject, g_noDataRefs);
+        
+        if (particle.instance) {
+            /* Set initial position */
+            XPLMDrawInfo_t drawInfo;
+            drawInfo.structSize = sizeof(XPLMDrawInfo_t);
+            drawInfo.x = particle.x;
+            drawInfo.y = particle.y;
+            drawInfo.z = particle.z;
+            drawInfo.pitch = 0.0f;
+            drawInfo.heading = 0.0f;
+            drawInfo.roll = 0.0f;
+            XPLMInstanceSetPosition(particle.instance, &drawInfo, nullptr);
+        }
+    }
     
     truck.particles.push_back(particle);
     g_particlesEmittedTotal++;
@@ -967,6 +1058,8 @@ static void EmitParticle(FireTruck& truck) {
 
 /*
  * RegisterDrawCallback - Register the draw callback for water particles
+ * Note: With instance-based rendering, this callback is mainly for debugging.
+ * The actual rendering is handled by X-Plane's instance system.
  */
 static void RegisterDrawCallback() {
     if (!g_drawCallbackRegistered) {
@@ -975,8 +1068,8 @@ static void RegisterDrawCallback() {
         g_drawCallbackCallCount = 0; /* Reset counter */
         DebugLog("Draw callback registered (result=%d)", result);
         DebugLog("  Drawing phase: xplm_Phase_Modern3D (%d)", WATER_DRAWING_PHASE);
-        DebugLog("  NOTE: Callback will be invoked but water particles won't be visible");
-        DebugLog("  because the DrawWaterParticles function lacks OpenGL rendering code.");
+        DebugLog("  Water particles now use instance-based rendering");
+        DebugLog("  Water droplet model loaded: %s", g_waterDropObject ? "YES" : "NO");
     }
 }
 
@@ -995,14 +1088,9 @@ static void UnregisterDrawCallback() {
 /* 
  * Draw callback for rendering water particles
  * 
- * IMPORTANT DEBUG NOTE: This function is called but does NOT actually render 
- * any visible particles. The particle data is computed but no OpenGL drawing
- * commands are executed. This is a known limitation.
- * 
- * To implement visible water effects, one of the following approaches is needed:
- * 1. Use OpenGL immediate mode or VBOs to draw billboarded quads
- * 2. Use X-Plane's particle system (if available in SDK version)
- * 3. Use instanced OBJ rendering for water droplet models
+ * Note: With instance-based rendering, the actual particle rendering is handled
+ * by X-Plane's instance system (XPLMCreateInstance/XPLMInstanceSetPosition).
+ * This callback is kept for debugging and statistics purposes.
  */
 static int DrawWaterParticles(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon) {
     (void)inPhase;
@@ -1015,6 +1103,7 @@ static int DrawWaterParticles(XPLMDrawingPhase inPhase, int inIsBefore, void* in
     if (g_drawCallbackCallCount == 1) {
         DebugLog("DrawWaterParticles callback first invocation");
         DebugLog("  Phase: %d, IsBefore: %d", inPhase, inIsBefore);
+        DebugLog("  Using instance-based rendering for water particles");
     }
     
     if (g_state != STATE_WATER_SPRAYING) {
@@ -1024,56 +1113,32 @@ static int DrawWaterParticles(XPLMDrawingPhase inPhase, int inIsBefore, void* in
         return 1;
     }
     
-    /* Set up graphics state for particle rendering */
-    XPLMSetGraphicsState(0, 0, 0, 0, 1, 1, 0);
-    
     /* Count active particles for debugging */
     int leftActiveCount = 0;
     int rightActiveCount = 0;
+    int leftInstanceCount = 0;
+    int rightInstanceCount = 0;
     
-    /* Draw particles as points/billboards */
-    /* 
-     * =====================================================================
-     * WARNING: NO ACTUAL RENDERING IS HAPPENING HERE!
-     * =====================================================================
-     * The code below iterates through particles but does NOT draw anything.
-     * This is why no water effect is visible.
-     * 
-     * To fix this, OpenGL drawing commands need to be added, such as:
-     * - glBegin(GL_POINTS) / glVertex3f() / glEnd() for point particles
-     * - Or textured quads for billboarded water droplets
-     * - Or use XPLMDrawString for debug visualization
-     * =====================================================================
-     */
-    
-    auto drawTruckParticles = [](const FireTruck& truck, int& activeCount) {
-        for (const auto& particle : truck.particles) {
-            if (!particle.active) continue;
-            activeCount++;
-            
-            /* Calculate alpha based on lifetime */
-            float alpha = particle.lifetime / particle.maxLifetime;
-            
-            /* 
-             * PLACEHOLDER: No actual drawing is performed here!
-             * This is where OpenGL calls should go to render the particles.
-             * Currently the particles exist in memory but are not visualized.
-             */
-            (void)alpha;
-            (void)particle; /* Silence unused variable warning */
+    /* Count particles and instances */
+    for (const auto& particle : g_leftTruck.particles) {
+        if (particle.active) {
+            leftActiveCount++;
+            if (particle.instance) leftInstanceCount++;
         }
-    };
+    }
+    for (const auto& particle : g_rightTruck.particles) {
+        if (particle.active) {
+            rightActiveCount++;
+            if (particle.instance) rightInstanceCount++;
+        }
+    }
     
-    drawTruckParticles(g_leftTruck, leftActiveCount);
-    drawTruckParticles(g_rightTruck, rightActiveCount);
-    
-    /* Periodic logging of particle counts during drawing */
+    /* Periodic logging of particle counts */
     if (g_drawCallbackCallCount % 100 == 0) {
         DebugLog("DrawWaterParticles stats (call #%d):", g_drawCallbackCallCount);
-        DebugLog("  Left truck active particles: %d", leftActiveCount);
-        DebugLog("  Right truck active particles: %d", rightActiveCount);
-        DebugLog("  WARNING: Particles are being tracked but NOT rendered!");
-        DebugLog("  The DrawWaterParticles function needs OpenGL drawing code.");
+        DebugLog("  Left truck: %d particles, %d instances", leftActiveCount, leftInstanceCount);
+        DebugLog("  Right truck: %d particles, %d instances", rightActiveCount, rightInstanceCount);
+        DebugLog("  Total particles emitted: %d", g_particlesEmittedTotal);
     }
     
     return 1;
