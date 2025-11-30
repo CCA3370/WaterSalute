@@ -16,6 +16,10 @@ set(XPLM_SDK_PATH "${CMAKE_SOURCE_DIR}/SDK")
 # Source files
 set(SOURCES
     src/WaterSalute.cpp
+    src/Common.cpp
+    src/RoadNetwork.cpp
+    src/PathPlanning.cpp
+    src/FireTruck.cpp
 )
 
 # Platform detection
