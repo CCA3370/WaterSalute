@@ -206,12 +206,15 @@ static float CalculateTurningRate(float speed, float frontSteerAngleDeg) {
     
     /* Ackermann formula for front and rear steering:
      * turning_rate = speed * (tan(front_angle) + tan(|rear_angle|)) / wheelbase
-     * Since rear angle has opposite sign (counter-steering), we use:
-     * tan(front) - tan(rear) = tan(front) + tan(|rear|)
+     * 
+     * Since rear axle uses counter-steering (rearSteerAngleDeg is negative when 
+     * frontSteerAngleDeg is positive), we have:
+     *   tan(rearSteerAngleRad) = tan(-|angle|) = -tan(|angle|)
+     * Therefore: tanFront - tanRear = tanFront - (-tan(|rear|)) = tanFront + tan(|rear|)
      */
     float tanFront = tanf(frontSteerAngleRad);
     float tanRear = tanf(rearSteerAngleRad);
-    float combinedTan = tanFront - tanRear;  /* Equivalent to tan(front) + tan(|rear|) */
+    float combinedTan = tanFront - tanRear;
     
     /* Calculate turning rate in rad/s using Ackermann method */
     float turningRateRad = (speed * combinedTan) / WHEELBASE;
