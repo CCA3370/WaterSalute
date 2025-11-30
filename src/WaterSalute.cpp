@@ -37,6 +37,7 @@
 
 /* Constants */
 static const float KNOTS_TO_MS = 0.514444f;        /* Knots to m/s conversion */
+static const float FEET_TO_METERS = 0.3048f;       /* Feet to meters conversion */
 static const float MAX_GROUND_SPEED_KNOTS = 40.0f; /* Maximum ground speed for water salute */
 static const float TRUCK_APPROACH_SPEED = 15.0f;   /* Fire truck approach speed in m/s */
 static const float TRUCK_TURN_IN_PLACE_SPEED = 2.0f; /* Speed for turning in place (m/s) */
@@ -51,6 +52,13 @@ static const float PARTICLE_LIFETIME = 2.0f;       /* Particle lifetime in secon
 static const int   NUM_PARTICLES_PER_JET = 100;    /* Number of particles per water jet */
 static const float PARTICLE_EMIT_RATE = 0.02f;     /* Time between particle emissions (seconds) */
 static const XPLMDrawingPhase WATER_DRAWING_PHASE = xplm_Phase_Modern3D; /* Drawing phase for water particles */
+
+/* Wingspan validation constants */
+static const float MIN_SEMISPAN_METERS = 2.5f;     /* Minimum semispan (half wingspan) in meters (small aircraft ~5m wingspan) */
+static const float MAX_SEMISPAN_METERS = 45.0f;    /* Maximum semispan in meters (A380 wingspan ~80m / 2) */
+static const float MIN_WINGSPAN_METERS = 5.0f;     /* Minimum valid wingspan in meters */
+static const float MAX_WINGSPAN_METERS = 90.0f;    /* Maximum valid wingspan in meters (A380 ~80m) */
+static const float DEFAULT_WINGSPAN_METERS = 30.0f; /* Default wingspan if not available */
 
 /* Debug configuration */
 #ifndef WATERSALUTE_DEBUG_VERBOSE
@@ -710,12 +718,38 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     g_drLocalZ = XPLMFindDataRef("sim/flightmodel/position/local_z");
     g_drHeading = XPLMFindDataRef("sim/flightmodel/position/psi");
     
-    /* Find wingspan dataref - try several possible datarefs */
-    g_drWingspan = XPLMFindDataRef("sim/aircraft/parts/acf_wing_span");
+    /* Find wingspan dataref - try several possible datarefs
+     * 
+     * Based on analysis of BetterPushback project (olivierbutler/BetterPusbackMod):
+     * - BetterPushback reads wing geometry directly from ACF file properties:
+     *   - _wing/%d/_semilen_SEG (wing segment semi-length in feet)
+     *   - acf/_size_x (half wingspan/semispan in feet, older XP versions)
+     *   - Or calculates from wing outline point coordinates
+     * 
+     * For simpler dataref-based approach, we try:
+     * - sim/aircraft/view/acf_semi_len_m: aircraft half-width (semispan) in meters
+     * - sim/aircraft/overflow/acf_span: wingspan in feet (if available)
+     * 
+     * Note: sim/aircraft/view/acf_Vso is stall speed in knots, NOT wingspan!
+     * 
+     * Try multiple possible datarefs for compatibility with different X-Plane versions.
+     */
+    g_drWingspan = XPLMFindDataRef("sim/aircraft/view/acf_semi_len_m");  /* Semispan in meters (XP12 primary) */
+    if (!g_drWingspan) {
+        g_drWingspan = XPLMFindDataRef("sim/aircraft/overflow/acf_span");  /* Wingspan in feet (fallback) */
+    }
+    if (!g_drWingspan) {
+        g_drWingspan = XPLMFindDataRef("sim/aircraft/parts/acf_wing_span");
+    }
     if (!g_drWingspan) {
         g_drWingspan = XPLMFindDataRef("sim/aircraft/view/acf_wing_span");
     }
     /* Note: If wingspan dataref not found, a default value of 30m is used in StartWaterSalute */
+    if (g_drWingspan) {
+        DebugLog("Wingspan dataref found (will verify value at water salute start)");
+    } else {
+        DebugLog("WARNING: No wingspan dataref found, will use default 30m");
+    }
     
     /* Create terrain probe */
     g_terrainProbe = XPLMCreateProbe(xplm_ProbeY);
@@ -1067,17 +1101,51 @@ static void StartWaterSalute() {
     double acZ = g_drLocalZ ? XPLMGetDatad(g_drLocalZ) : 0.0;
     float acHeading = g_drHeading ? XPLMGetDataf(g_drHeading) : 0.0f;
     
-    /* Get aircraft wingspan (default to 30 meters if not available) */
-    float wingspan = 30.0f;
+    /* Get aircraft wingspan 
+     * Based on analysis of BetterPushback project (olivierbutler/BetterPusbackMod):
+     * - BetterPushback reads wing geometry directly from ACF file, calculating
+     *   semispan from wing segment properties or acf/_size_x (in feet)
+     * 
+     * Dataref units by source (priority order):
+     * - sim/aircraft/view/acf_semi_len_m: semispan (half-width) in METERS
+     *   -> Need to multiply by 2 to get full wingspan
+     * - sim/aircraft/overflow/acf_span: wingspan in FEET
+     *   -> Need FEET_TO_METERS conversion
+     * - sim/aircraft/parts/acf_wing_span: if exists, may return meters
+     * - sim/aircraft/view/acf_wing_span: if exists, may return meters
+     * 
+     * Strategy: Detect which dataref we found and apply appropriate conversion.
+     * Default to 30 meters if not available or value is unreasonable.
+     */
+    float wingspan = DEFAULT_WINGSPAN_METERS;  /* Default wingspan in meters */
     if (g_drWingspan) {
-        wingspan = XPLMGetDataf(g_drWingspan);
-        DebugLog("Raw wingspan dataref value: %.2f", wingspan);
-        if (wingspan <= 0.0f || wingspan > 100.0f) {
-            DebugLog("Invalid wingspan value, using default 30m");
-            wingspan = 30.0f; /* Use default for invalid values */
+        float rawValue = XPLMGetDataf(g_drWingspan);
+        DebugLog("Raw wingspan dataref value: %.2f", rawValue);
+        
+        /* Check if we're using acf_semi_len_m (semispan in meters) */
+        if (rawValue >= MIN_SEMISPAN_METERS && rawValue <= MAX_SEMISPAN_METERS) {
+            /* Likely acf_semi_len_m (semispan in meters), multiply by 2 for full wingspan */
+            wingspan = rawValue * 2.0f;
+            DebugLog("Interpreted as semispan in meters, wingspan: %.2f m", wingspan);
+        } else {
+            /* Try feet->meters conversion (acf_span returns full wingspan in feet) */
+            float wingspanMeters = rawValue * FEET_TO_METERS;
+            DebugLog("Wingspan after feet->meters conversion: %.2f m", wingspanMeters);
+            
+            /* Sanity check: wingspan should be within valid range */
+            if (wingspanMeters >= MIN_WINGSPAN_METERS && wingspanMeters <= MAX_WINGSPAN_METERS) {
+                wingspan = wingspanMeters;
+            } else if (rawValue >= MIN_WINGSPAN_METERS && rawValue <= MAX_WINGSPAN_METERS) {
+                /* Fallback: If converted value is unreasonable, raw value might already be full wingspan in meters */
+                DebugLog("Converted value unreasonable, using raw value as meters (fallback)");
+                wingspan = rawValue;
+            } else {
+                DebugLog("Invalid wingspan value (%.2f ft / %.2f m), using default %.0fm", 
+                         rawValue, wingspanMeters, DEFAULT_WINGSPAN_METERS);
+            }
         }
     } else {
-        DebugLog("Wingspan dataref not found, using default 30m");
+        DebugLog("Wingspan dataref not found, using default %.0fm", DEFAULT_WINGSPAN_METERS);
     }
     
     DebugLog("Aircraft position: (%.2f, %.2f, %.2f)", acX, acY, acZ);
@@ -1091,14 +1159,24 @@ static void StartWaterSalute() {
     /* Convert heading to radians */
     float headingRad = acHeading * DEG_TO_RAD;
     
-    /* Calculate forward vector (X-Plane uses -Z as forward) */
-    float forwardX = -sinf(headingRad);
+    /* Calculate forward vector in X-Plane coordinate system:
+     * - X-Plane uses: +X = East, -Z = North
+     * - Heading (psi): 0° = North, 90° = East, 180° = South, 270° = West
+     * - For heading θ: forward = (sin(θ), -cos(θ)) in (X, Z)
+     *   - heading 0°: forward = (0, -1) = North/-Z ✓
+     *   - heading 90°: forward = (1, 0) = East/+X ✓
+     */
+    float forwardX = sinf(headingRad);
     float forwardZ = -cosf(headingRad);
     DebugLog("Forward vector: (%.4f, %.4f)", forwardX, forwardZ);
     
-    /* Calculate right vector */
+    /* Calculate right vector (perpendicular to forward, 90° clockwise):
+     * - For heading θ: right = (cos(θ), sin(θ)) in (X, Z)
+     *   - heading 0°: right = (1, 0) = East/+X ✓
+     *   - heading 90°: right = (0, 1) = South/+Z ✓
+     */
     float rightX = cosf(headingRad);
-    float rightZ = -sinf(headingRad);
+    float rightZ = sinf(headingRad);
     DebugLog("Right vector: (%.4f, %.4f)", rightX, rightZ);
     
     /* Calculate truck start positions (500 meters ahead) */
@@ -1366,13 +1444,16 @@ static void UpdateTrucks(float dt) {
             while (truck.heading >= 360.0f) truck.heading -= 360.0f;
             while (truck.heading < 0.0f) truck.heading += 360.0f;
             
-            /* Move truck in the direction it's facing */
+            /* Move truck in the direction it's facing
+             * Using X-Plane coordinate system:
+             * - For heading θ: forward direction = (sin(θ), -cos(θ)) in (X, Z)
+             */
             float headingRad = truck.heading * DEG_TO_RAD;
             float moveDistance = truck.speed * dt;
             if (moveDistance > distance) moveDistance = distance;
             
             /* Update position based on current heading (not target direction) */
-            truck.x += -sinf(headingRad) * moveDistance;
+            truck.x += sinf(headingRad) * moveDistance;
             truck.z += -cosf(headingRad) * moveDistance;
             truck.y = GetTerrainHeight(static_cast<float>(truck.x), static_cast<float>(truck.z));
             
@@ -1446,14 +1527,17 @@ static void UpdateTrucks(float dt) {
         while (truck.heading >= 360.0f) truck.heading -= 360.0f;
         while (truck.heading < 0.0f) truck.heading += 360.0f;
         
-        /* Move forward in the direction the truck is facing */
+        /* Move forward in the direction the truck is facing
+         * Using X-Plane coordinate system:
+         * - For heading θ: forward direction = (sin(θ), -cos(θ)) in (X, Z)
+         */
         float headingRad = truck.heading * DEG_TO_RAD;
         float moveDistance = truck.speed * dt;
         
         /* Update wheel rotation angle based on distance moved */
         UpdateWheelRotationAngle(truck, moveDistance);
         
-        truck.x += -sinf(headingRad) * moveDistance;
+        truck.x += sinf(headingRad) * moveDistance;
         truck.z += -cosf(headingRad) * moveDistance;
         truck.y = GetTerrainHeight(static_cast<float>(truck.x), static_cast<float>(truck.z));
         
@@ -1629,12 +1713,19 @@ static void EmitParticle(FireTruck& truck) {
         return;
     }
     
-    /* Calculate nozzle world position */
+    /* Calculate nozzle world position 
+     * nozzleOffsetX: lateral offset (positive = right side of truck)
+     * nozzleOffsetZ: forward offset (positive = front of truck)
+     * 
+     * Using X-Plane coordinate system with rotation:
+     * - right = (cos(θ), sin(θ)) in (X, Z)
+     * - forward = (sin(θ), -cos(θ)) in (X, Z)
+     */
     float headingRad = truck.heading * DEG_TO_RAD;
     float cosH = cosf(headingRad);
     float sinH = sinf(headingRad);
     
-    float nozzleX = static_cast<float>(truck.x) + truck.nozzleOffsetX * cosH + truck.nozzleOffsetZ * (-sinH);
+    float nozzleX = static_cast<float>(truck.x) + truck.nozzleOffsetX * cosH + truck.nozzleOffsetZ * sinH;
     float nozzleY = static_cast<float>(truck.y) + truck.nozzleOffsetY;
     float nozzleZ = static_cast<float>(truck.z) + truck.nozzleOffsetX * sinH + truck.nozzleOffsetZ * (-cosH);
     
