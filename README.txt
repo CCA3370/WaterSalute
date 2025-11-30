@@ -18,7 +18,7 @@ INSTALLATION
            └── WaterSalute/
                ├── resources/
                │   ├── firetruck.obj
-               │   └── firetruck.png
+               │   └── Panther3.png
                ├── lin_x64/
                │   └── WaterSalute.xpl  (Linux)
                ├── win_x64/
