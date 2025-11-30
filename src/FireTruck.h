@@ -62,4 +62,11 @@ FireTruck* GetTruckByIndex(int index);
 void EmitParticle(FireTruck& truck);
 void UpdateWaterParticles(float dt);
 
+/* Raindrop effect functions */
+void InitializeRaindropEffect();
+void CleanupRaindropEffect();
+void UpdateRaindropEffect(float dt, double acX, double acY, double acZ);
+int CountNearbyParticles(double acX, double acY, double acZ);
+float GetCurrentRaindropIntensity();
+
 #endif /* WATERSALUTE_FIRETRUCK_H */

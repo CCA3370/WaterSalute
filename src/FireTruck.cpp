@@ -379,3 +379,202 @@ void UpdateWaterParticles(float dt) {
     updateParticlesForTruck(g_leftTruck);
     updateParticlesForTruck(g_rightTruck);
 }
+
+/* ============================================================================
+ * Raindrop Effect on Windshield Implementation
+ * ============================================================================
+ * When the aircraft passes through the water gate, water droplets appear
+ * on the windshield to simulate the effect of water hitting the glass.
+ */
+
+/* Raindrop effect state */
+static XPLMDataRef g_drRainOnAircraft = nullptr;      /* X-Plane rain on aircraft dataref */
+static XPLMDataRef g_drPrecipOnAircraft = nullptr;    /* Alternative precipitation dataref */
+static float g_currentRaindropIntensity = 0.0f;       /* Current raindrop intensity (0.0 - 1.0) */
+static float g_targetRaindropIntensity = 0.0f;        /* Target raindrop intensity */
+static float g_raindropUpdateTimer = 0.0f;            /* Timer for detection updates */
+static bool g_raindropEffectActive = false;           /* Whether the effect is currently active */
+static float g_originalRainValue = 0.0f;              /* Original rain value before we modified it */
+static bool g_savedOriginalRain = false;              /* Whether we've saved the original rain value */
+
+/* Initialize the raindrop effect system */
+void InitializeRaindropEffect() {
+    DebugLog("Initializing raindrop effect system...");
+    
+    /* Try to find the rain/precipitation dataref */
+    /* This dataref controls how much rain/water is visible on the aircraft */
+    g_drRainOnAircraft = XPLMFindDataRef("sim/private/controls/rain/precipitation_on_aircraft_ratio");
+    if (!g_drRainOnAircraft) {
+        /* Try alternative dataref */
+        g_drRainOnAircraft = XPLMFindDataRef("sim/weather/rain_percent");
+    }
+    if (!g_drRainOnAircraft) {
+        /* Try yet another alternative */
+        g_drPrecipOnAircraft = XPLMFindDataRef("sim/graphics/effects/rain_scale");
+    }
+    
+    g_currentRaindropIntensity = 0.0f;
+    g_targetRaindropIntensity = 0.0f;
+    g_raindropUpdateTimer = 0.0f;
+    g_raindropEffectActive = false;
+    g_savedOriginalRain = false;
+    
+    if (g_drRainOnAircraft) {
+        DebugLog("Raindrop effect system initialized with primary dataref");
+    } else if (g_drPrecipOnAircraft) {
+        DebugLog("Raindrop effect system initialized with fallback dataref");
+    } else {
+        DebugLog("WARNING: No rain dataref found - raindrop effect may not be visible");
+    }
+}
+
+/* Clean up the raindrop effect system */
+void CleanupRaindropEffect() {
+    /* Restore original rain value if we modified it */
+    if (g_savedOriginalRain) {
+        if (g_drRainOnAircraft) {
+            XPLMSetDataf(g_drRainOnAircraft, g_originalRainValue);
+        } else if (g_drPrecipOnAircraft) {
+            XPLMSetDataf(g_drPrecipOnAircraft, g_originalRainValue);
+        }
+        g_savedOriginalRain = false;
+    }
+    
+    g_currentRaindropIntensity = 0.0f;
+    g_targetRaindropIntensity = 0.0f;
+    g_raindropEffectActive = false;
+    
+    DebugLog("Raindrop effect system cleaned up");
+}
+
+/* Count water particles near the aircraft */
+int CountNearbyParticles(double acX, double acY, double acZ) {
+    int nearbyCount = 0;
+    
+    auto countForTruck = [acX, acY, acZ, &nearbyCount](const FireTruck& truck) {
+        for (const auto& particle : truck.particles) {
+            if (!particle.active) continue;
+            
+            /* Calculate 3D distance from aircraft to particle */
+            double dx = particle.x - acX;
+            double dy = particle.y - acY;
+            double dz = particle.z - acZ;
+            
+            /* Check if particle is within detection radius horizontally */
+            double horizontalDist = sqrt(dx * dx + dz * dz);
+            if (horizontalDist > RAINDROP_DETECTION_RADIUS) continue;
+            
+            /* Check if particle is at approximately the same height (with tolerance) */
+            if (fabs(dy) > RAINDROP_DETECTION_HEIGHT) continue;
+            
+            nearbyCount++;
+        }
+    };
+    
+    countForTruck(g_leftTruck);
+    countForTruck(g_rightTruck);
+    
+    return nearbyCount;
+}
+
+/* Get current raindrop intensity */
+float GetCurrentRaindropIntensity() {
+    return g_currentRaindropIntensity;
+}
+
+/* Update the raindrop effect based on aircraft proximity to water */
+void UpdateRaindropEffect(float dt, double acX, double acY, double acZ) {
+    /* Only update when water is spraying */
+    if (g_state != STATE_WATER_SPRAYING) {
+        /* Fade out the effect when not spraying */
+        if (g_currentRaindropIntensity > 0.0f) {
+            g_targetRaindropIntensity = 0.0f;
+            g_currentRaindropIntensity -= dt / RAINDROP_FADE_OUT_TIME;
+            if (g_currentRaindropIntensity < 0.0f) {
+                g_currentRaindropIntensity = 0.0f;
+            }
+            
+            /* Apply the effect */
+            if (g_drRainOnAircraft) {
+                XPLMSetDataf(g_drRainOnAircraft, g_originalRainValue + g_currentRaindropIntensity);
+            } else if (g_drPrecipOnAircraft) {
+                XPLMSetDataf(g_drPrecipOnAircraft, g_originalRainValue + g_currentRaindropIntensity);
+            }
+            
+            /* Restore original value when effect is done */
+            if (g_currentRaindropIntensity == 0.0f && g_savedOriginalRain) {
+                if (g_drRainOnAircraft) {
+                    XPLMSetDataf(g_drRainOnAircraft, g_originalRainValue);
+                } else if (g_drPrecipOnAircraft) {
+                    XPLMSetDataf(g_drPrecipOnAircraft, g_originalRainValue);
+                }
+                g_savedOriginalRain = false;
+                g_raindropEffectActive = false;
+                DebugLog("Raindrop effect faded out completely");
+            }
+        }
+        return;
+    }
+    
+    /* Save original rain value before first modification */
+    if (!g_savedOriginalRain) {
+        if (g_drRainOnAircraft) {
+            g_originalRainValue = XPLMGetDataf(g_drRainOnAircraft);
+        } else if (g_drPrecipOnAircraft) {
+            g_originalRainValue = XPLMGetDataf(g_drPrecipOnAircraft);
+        }
+        g_savedOriginalRain = true;
+        DebugLog("Saved original rain value: %.3f", g_originalRainValue);
+    }
+    
+    /* Update detection less frequently for performance */
+    g_raindropUpdateTimer += dt;
+    if (g_raindropUpdateTimer >= RAINDROP_UPDATE_INTERVAL) {
+        g_raindropUpdateTimer = 0.0f;
+        
+        /* Count nearby particles */
+        int nearbyParticles = CountNearbyParticles(acX, acY, acZ);
+        
+        /* Calculate target intensity based on particle count
+         * The ratio is based on expected max particles from both trucks.
+         * The multiplier boosts the intensity for better visual effect since
+         * aircraft often only partially intersects the water spray area. */
+        int maxParticles = NUM_PARTICLES_PER_JET * RAINDROP_TRUCK_COUNT;
+        float particleRatio = static_cast<float>(nearbyParticles) / static_cast<float>(maxParticles);
+        g_targetRaindropIntensity = fminf(particleRatio * RAINDROP_INTENSITY_MULTIPLIER, RAINDROP_EFFECT_MAX);
+        
+        if (nearbyParticles > 0 && !g_raindropEffectActive) {
+            DebugLog("Aircraft entering water spray - %d particles nearby", nearbyParticles);
+            g_raindropEffectActive = true;
+        } else if (nearbyParticles == 0 && g_raindropEffectActive && g_currentRaindropIntensity < 0.01f) {
+            DebugLog("Aircraft left water spray area");
+            g_raindropEffectActive = false;
+        }
+    }
+    
+    /* Smooth transition to target intensity */
+    if (g_currentRaindropIntensity < g_targetRaindropIntensity) {
+        /* Fade in */
+        g_currentRaindropIntensity += dt / RAINDROP_FADE_IN_TIME;
+        if (g_currentRaindropIntensity > g_targetRaindropIntensity) {
+            g_currentRaindropIntensity = g_targetRaindropIntensity;
+        }
+    } else if (g_currentRaindropIntensity > g_targetRaindropIntensity) {
+        /* Fade out */
+        g_currentRaindropIntensity -= dt / RAINDROP_FADE_OUT_TIME;
+        if (g_currentRaindropIntensity < g_targetRaindropIntensity) {
+            g_currentRaindropIntensity = g_targetRaindropIntensity;
+        }
+    }
+    
+    /* Apply the rain effect to the windshield */
+    /* The rain effect is added on top of any existing weather rain */
+    float effectValue = g_originalRainValue + g_currentRaindropIntensity;
+    effectValue = fminf(effectValue, 1.0f);  /* Cap at maximum */
+    
+    if (g_drRainOnAircraft) {
+        XPLMSetDataf(g_drRainOnAircraft, effectValue);
+    } else if (g_drPrecipOnAircraft) {
+        XPLMSetDataf(g_drPrecipOnAircraft, effectValue);
+    }
+}

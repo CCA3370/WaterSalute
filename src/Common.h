@@ -61,6 +61,16 @@ static const float PARTICLE_DRAG = 0.15f;          /* Air drag coefficient for p
 static const float PARTICLE_TURBULENCE = 0.02f;    /* Turbulence amount for particle movement */
 static const XPLMDrawingPhase WATER_DRAWING_PHASE = xplm_Phase_Modern3D; /* Drawing phase for water particles */
 
+/* Raindrop effect on windshield constants */
+static const float RAINDROP_DETECTION_RADIUS = 50.0f;  /* Radius to detect water particles near aircraft (meters) */
+static const float RAINDROP_DETECTION_HEIGHT = 20.0f;  /* Height range to detect water particles (meters) */
+static const float RAINDROP_EFFECT_MAX = 0.8f;         /* Maximum rain effect intensity (0.0 - 1.0) */
+static const float RAINDROP_FADE_IN_TIME = 0.5f;       /* Time to fade in rain effect (seconds) */
+static const float RAINDROP_FADE_OUT_TIME = 2.0f;      /* Time to fade out rain effect (seconds) */
+static const float RAINDROP_UPDATE_INTERVAL = 0.1f;    /* Interval to update raindrop detection (seconds) */
+static const int   RAINDROP_TRUCK_COUNT = 2;           /* Number of trucks for particle ratio calculation */
+static const float RAINDROP_INTENSITY_MULTIPLIER = 2.0f; /* Multiplier to boost intensity for visual effect */
+
 /* Wingspan validation constants */
 static const float MIN_SEMISPAN_METERS = 2.5f;     /* Minimum semispan (half wingspan) in meters */
 static const float MAX_SEMISPAN_METERS = 45.0f;    /* Maximum semispan in meters (A380 wingspan ~80m / 2) */
