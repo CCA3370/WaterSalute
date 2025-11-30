@@ -190,18 +190,16 @@ static void UpdateWheelRotationAngle(FireTruck& truck, float distanceMoved) {
  *
  * @param speed Vehicle speed in m/s
  * @param frontSteerAngleDeg Front wheel steering angle in degrees (-45 to 45)
+ * @param rearSteerAngleDeg Rear wheel steering angle in degrees (-45 to 45)
  * @return Turning rate in degrees per second
  */
-static float CalculateTurningRate(float speed, float frontSteerAngleDeg) {
+static float CalculateTurningRate(float speed, float frontSteerAngleDeg, float rearSteerAngleDeg) {
     if (fabsf(speed) < 0.01f || fabsf(frontSteerAngleDeg) < 0.1f) {
         return 0.0f;
     }
     
-    /* Convert front steering angle to radians */
+    /* Convert steering angles to radians */
     float frontSteerAngleRad = frontSteerAngleDeg * DEG_TO_RAD;
-    
-    /* Calculate rear steering angle (counter-steering) */
-    float rearSteerAngleDeg = -frontSteerAngleDeg * REAR_STEER_RATIO;
     float rearSteerAngleRad = rearSteerAngleDeg * DEG_TO_RAD;
     
     /* Ackermann formula for front and rear steering:
@@ -1331,8 +1329,8 @@ static void UpdateTrucks(float dt) {
             /* Set vehicle speed */
             truck.speed = TRUCK_APPROACH_SPEED;
             
-            /* STEP 3: Calculate turning rate from front wheel angle and speed */
-            float turningRate = CalculateTurningRate(truck.speed, truck.frontSteeringAngle);
+            /* STEP 3: Calculate turning rate from front and rear wheel angles using Ackermann method */
+            float turningRate = CalculateTurningRate(truck.speed, truck.frontSteeringAngle, truck.rearSteeringAngle);
             
             /* STEP 4: Update heading based on turning rate */
             truck.heading += turningRate * dt;
@@ -1372,8 +1370,8 @@ static void UpdateTrucks(float dt) {
                 /* For turning in place, use a small speed to calculate turn rate */
                 truck.speed = TRUCK_TURN_IN_PLACE_SPEED;
                 
-                /* STEP 3: Calculate and apply turning rate */
-                float turningRate = CalculateTurningRate(truck.speed, truck.frontSteeringAngle);
+                /* STEP 3: Calculate and apply turning rate using Ackermann method */
+                float turningRate = CalculateTurningRate(truck.speed, truck.frontSteeringAngle, truck.rearSteeringAngle);
                 truck.heading += turningRate * dt;
                 while (truck.heading >= 360.0f) truck.heading -= 360.0f;
                 while (truck.heading < 0.0f) truck.heading += 360.0f;
@@ -1412,8 +1410,8 @@ static void UpdateTrucks(float dt) {
         /* Set speed for leaving */
         truck.speed = TRUCK_APPROACH_SPEED * TRUCK_LEAVING_SPEED_MULT;
         
-        /* STEP 3: Calculate turning rate from front wheel angle and speed */
-        float turningRate = CalculateTurningRate(truck.speed, truck.frontSteeringAngle);
+        /* STEP 3: Calculate turning rate from front and rear wheel angles using Ackermann method */
+        float turningRate = CalculateTurningRate(truck.speed, truck.frontSteeringAngle, truck.rearSteeringAngle);
         
         /* STEP 4: Update heading based on turning rate */
         truck.heading += turningRate * dt;
