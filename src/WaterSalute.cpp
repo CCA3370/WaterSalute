@@ -96,7 +96,7 @@ struct FireTruck {
     float nozzleOffsetY;     /* Nozzle height */
     float nozzleOffsetZ;     /* Nozzle forward offset */
     float frontSteeringAngle;     /* Front axles steering angle in degrees (-45 to 45), negative when turning left */
-    float rearSteeringAngle;      /* Rear axle steering angle in degrees (-45 to 45), positive when turning left (counter-steering) */
+    float rearSteeringAngle;      /* Rear axle steering angle in degrees (-45 to 45), opposite sign to frontSteeringAngle for counter-steering */
     float wheelRotationAngle;     /* Wheel rotation angle in degrees (0-360°), updated based on vehicle speed */
     float cannonPitch;       /* Water cannon pitch angle in degrees (0 to 90) */
     float cannonYaw;         /* Water cannon yaw angle in degrees (-180 to 180) */
@@ -153,10 +153,8 @@ static const float REAR_STEER_RATIO = 0.4f;             /* Ratio for rear axle c
  * NormalizeAngle360 - Normalize angle to 0-360° range
  */
 static float NormalizeAngle360(float angle) {
-    while (angle >= 360.0f) {
-        angle -= 360.0f;
-    }
-    while (angle < 0.0f) {
+    angle = fmodf(angle, 360.0f);
+    if (angle < 0.0f) {
         angle += 360.0f;
     }
     return angle;
@@ -477,8 +475,7 @@ static void LogDebugStatus() {
  * 
  * - watersalute/truck/rear_steering_angle: float array[2], read/write
  *   Rear axle steering angle in degrees (-45 to 45)
- *   Counter-steering for better maneuverability
- *   Positive when turning left, negative when turning right (opposite to front)
+ *   Uses counter-steering (opposite sign to front axles) for better maneuverability
  *   Index 0 = left truck, Index 1 = right truck
  * 
  * - watersalute/truck/wheel_rotation_angle: float array[2], read-only
@@ -1181,7 +1178,7 @@ static void InitializeTruck(FireTruck& truck) {
     truck.lastEmitTime = 0.0f;
     /* Initialize wheel and steering control properties */
     truck.frontSteeringAngle = 0.0f;  /* Front axles steering (negative = left turn) */
-    truck.rearSteeringAngle = 0.0f;   /* Rear axle steering (positive = left turn, counter-steer) */
+    truck.rearSteeringAngle = 0.0f;   /* Rear axle steering (opposite sign to front for counter-steering) */
     truck.wheelRotationAngle = 0.0f;  /* Wheel rotation angle 0-360° */
     truck.cannonPitch = DEFAULT_CANNON_PITCH;  /* Default pitch for water arc */
     truck.cannonYaw = 0.0f;     /* Default facing forward relative to truck */
