@@ -98,7 +98,7 @@ jobs:
 
       - name: Copy resources and documentation
         run: |
-          cp -r resources/* WaterSalute/resources/
+          cp -r resources/. WaterSalute/resources/
           cp LICENSE WaterSalute/LICENSE.txt
           cp README.txt WaterSalute/README.txt
 
