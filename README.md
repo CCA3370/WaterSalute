@@ -66,8 +66,8 @@ mingw32-make
            └── WaterSalute/
                ├── WaterSalute.xpl (or .dylib on macOS)
                └── resources/
-                   ├── firetruck.obj
-                   └── firetruck.mtl
+                   ├── firetruck.obj  # X-Plane OBJ8 format
+                   └── firetruck.png  # Texture file
    ```
 
 ## Usage
@@ -101,6 +101,7 @@ mingw32-make
 ### Fire Truck Model
 
 Replace `resources/firetruck.obj` with your own 3D model. The model should:
+- Be in **X-Plane OBJ8 format** (not Wavefront OBJ)
 - Be centered at origin (0, 0, 0) at the bottom
 - Face the -Z direction
 - Use meters as the unit scale
