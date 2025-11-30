@@ -711,12 +711,21 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
     
     g_debugLogTimer += dt;
     
+    /* Get aircraft position for raindrop effect detection */
+    double acX = g_drLocalX ? XPLMGetDatad(g_drLocalX) : 0.0;
+    double acY = g_drLocalY ? XPLMGetDatad(g_drLocalY) : 0.0;
+    double acZ = g_drLocalZ ? XPLMGetDatad(g_drLocalZ) : 0.0;
+    
     if (g_state == STATE_TRUCKS_APPROACHING || g_state == STATE_TRUCKS_POSITIONING) {
         UpdateTrucks(dt);
     } else if (g_state == STATE_WATER_SPRAYING) {
         UpdateWaterParticles(dt);
+        /* Update raindrop effect on windshield when water is spraying */
+        UpdateRaindropEffect(dt, acX, acY, acZ);
     } else if (g_state == STATE_TRUCKS_LEAVING) {
         UpdateTrucks(dt);
+        /* Continue updating raindrop effect to fade out */
+        UpdateRaindropEffect(dt, acX, acY, acZ);
     }
     
     return -1.0f;  /* Call every frame */
@@ -987,6 +996,9 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     LoadFireTruckModel();
     LoadWaterDropModel();
     
+    /* Initialize raindrop effect system */
+    InitializeRaindropEffect();
+    
     /* Register flight loop */
     XPLMCreateFlightLoop_t flightLoopParams;
     flightLoopParams.structSize = sizeof(XPLMCreateFlightLoop_t);
@@ -1012,6 +1024,9 @@ PLUGIN_API void XPluginStop(void) {
         XPLMDestroyFlightLoop(g_flightLoopId);
         g_flightLoopId = nullptr;
     }
+    
+    /* Cleanup raindrop effect */
+    CleanupRaindropEffect();
     
     /* Cleanup trucks */
     CleanupTruck(g_leftTruck);
