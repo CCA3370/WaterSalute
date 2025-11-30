@@ -34,9 +34,12 @@ X-Plane 12 插件，模拟飞机过水门仪式。两辆消防车驶向飞机并
 
 ### 转向逻辑
 
+使用阿克曼转向方法计算转向速率（不区分内外轮的不同角度和速度）：
+
 - **前轮角度**为主控制（±45度）
-- **后轮角度**由前轮推导：`rear_angle = -front_angle * 0.4`
-- **转向速率**由前轮角度和车速计算：`turning_rate = (speed * tan(front_angle)) / wheelbase`
+- **后轮角度**由前轮推导：`rear_angle = -front_angle * 0.4`（反向转向）
+- **转向速率**由前后轮角度和车速计算（阿克曼方法）：
+  `turning_rate = speed * (tan(front_angle) + tan(|rear_angle|)) / wheelbase`
 - 车辆航向根据转向速率更新
 
 ## License

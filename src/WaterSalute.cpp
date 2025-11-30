@@ -174,8 +174,20 @@ static void UpdateWheelRotationAngle(FireTruck& truck, float distanceMoved) {
 }
 
 /*
- * CalculateTurningRate - Calculate vehicle turning rate from front wheel steering angle
- * Uses the bicycle model: turning_rate = (speed * tan(steer_angle)) / wheelbase
+ * CalculateTurningRate - Calculate vehicle turning rate using Ackermann steering geometry
+ *
+ * Uses the Ackermann method for vehicles with front and rear wheel steering:
+ *   turning_radius R = wheelbase / (tan(front_angle) + tan(|rear_angle|))
+ *   turning_rate ω = speed / R = speed * (tan(front_angle) + tan(|rear_angle|)) / wheelbase
+ *
+ * For 8x8 trucks with counter-steering rear axle:
+ *   - Front axle steering angle: δ_f (primary control)
+ *   - Rear axle steering angle: δ_r = -δ_f * REAR_STEER_RATIO (counter-steering)
+ *   - Combined effect increases maneuverability by reducing turn radius
+ *
+ * Note: This simplified Ackermann model treats all wheels as having the same
+ * steering angle, without differentiating inner/outer wheel angles and speeds.
+ *
  * @param speed Vehicle speed in m/s
  * @param frontSteerAngleDeg Front wheel steering angle in degrees (-45 to 45)
  * @return Turning rate in degrees per second
@@ -184,9 +196,26 @@ static float CalculateTurningRate(float speed, float frontSteerAngleDeg) {
     if (fabsf(speed) < 0.01f || fabsf(frontSteerAngleDeg) < 0.1f) {
         return 0.0f;
     }
+    
+    /* Convert front steering angle to radians */
     float frontSteerAngleRad = frontSteerAngleDeg * DEG_TO_RAD;
-    /* Turning rate in rad/s = (speed * tan(steer_angle)) / wheelbase */
-    float turningRateRad = (speed * tanf(frontSteerAngleRad)) / WHEELBASE;
+    
+    /* Calculate rear steering angle (counter-steering) */
+    float rearSteerAngleDeg = -frontSteerAngleDeg * REAR_STEER_RATIO;
+    float rearSteerAngleRad = rearSteerAngleDeg * DEG_TO_RAD;
+    
+    /* Ackermann formula for front and rear steering:
+     * turning_rate = speed * (tan(front_angle) + tan(|rear_angle|)) / wheelbase
+     * Since rear angle has opposite sign (counter-steering), we use:
+     * tan(front) - tan(rear) = tan(front) + tan(|rear|)
+     */
+    float tanFront = tanf(frontSteerAngleRad);
+    float tanRear = tanf(rearSteerAngleRad);
+    float combinedTan = tanFront - tanRear;  /* Equivalent to tan(front) + tan(|rear|) */
+    
+    /* Calculate turning rate in rad/s using Ackermann method */
+    float turningRateRad = (speed * combinedTan) / WHEELBASE;
+    
     return turningRateRad * RAD_TO_DEG;
 }
 
