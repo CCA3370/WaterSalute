@@ -308,6 +308,13 @@ static void SetFrontSteeringAngle(void* inRefcon, float* inValues, int inOffset,
             if (angle < -MAX_STEERING_ANGLE) angle = -MAX_STEERING_ANGLE;
             if (angle > MAX_STEERING_ANGLE) angle = MAX_STEERING_ANGLE;
             truck->frontSteeringAngle = angle;
+            
+            /* Mirror steering to the other truck (opposite direction for symmetrical movement) */
+            if (inOffset + i == 0) {
+                g_rightTruck.frontSteeringAngle = -angle;
+            } else if (inOffset + i == 1) {
+                g_leftTruck.frontSteeringAngle = -angle;
+            }
         }
     }
 }
@@ -336,6 +343,13 @@ static void SetRearSteeringAngle(void* inRefcon, float* inValues, int inOffset, 
             if (angle < -MAX_STEERING_ANGLE) angle = -MAX_STEERING_ANGLE;
             if (angle > MAX_STEERING_ANGLE) angle = MAX_STEERING_ANGLE;
             truck->rearSteeringAngle = angle;
+            
+            /* Mirror steering to the other truck (opposite direction for symmetrical movement) */
+            if (inOffset + i == 0) {
+                g_rightTruck.rearSteeringAngle = -angle;
+            } else if (inOffset + i == 1) {
+                g_leftTruck.rearSteeringAngle = -angle;
+            }
         }
     }
 }
@@ -378,6 +392,13 @@ static void SetCannonPitch(void* inRefcon, float* inValues, int inOffset, int in
             if (pitch < MIN_CANNON_PITCH) pitch = MIN_CANNON_PITCH;
             if (pitch > MAX_CANNON_PITCH) pitch = MAX_CANNON_PITCH;
             truck->cannonPitch = pitch;
+            
+            /* Sync cannon pitch to the other truck (same value) */
+            if (inOffset + i == 0) {
+                g_rightTruck.cannonPitch = pitch;
+            } else if (inOffset + i == 1) {
+                g_leftTruck.cannonPitch = pitch;
+            }
         }
     }
 }
@@ -406,6 +427,13 @@ static void SetCannonYaw(void* inRefcon, float* inValues, int inOffset, int inCo
             while (yaw > 180.0f) yaw -= 360.0f;
             while (yaw < -180.0f) yaw += 360.0f;
             truck->cannonYaw = yaw;
+            
+            /* Sync cannon yaw to the other truck (same value) */
+            if (inOffset + i == 0) {
+                g_rightTruck.cannonYaw = yaw;
+            } else if (inOffset + i == 1) {
+                g_leftTruck.cannonYaw = yaw;
+            }
         }
     }
 }

@@ -23,13 +23,19 @@ X-Plane 12 插件，模拟飞机过水门仪式。两辆消防车驶向飞机并
 
 所有 dataref 为 float 数组，索引 0 = 左侧消防车，索引 1 = 右侧消防车。
 
+**镜像同步**：设置任意一辆车的参数时，另一辆车会自动同步：
+- **速度、车轮旋转角度、水炮角度**：两车完全相同
+- **转向角度**：两车镜像（符号相反），实现对称运动
+
+因此只需控制一辆车（索引 0 或 1）的参数，另一辆车会自动镜像同步。
+
 | Dataref | 单位 | 范围 | 读写 | 说明 |
 |---------|------|------|------|------|
-| `watersalute/truck/front_steering_angle` | 度 | -45 ~ 45 | R/W | 前轮转向角（前两组转向架共用） |
-| `watersalute/truck/rear_steering_angle` | 度 | -45 ~ 45 | R/W | 后轮转向角（反向转向） |
+| `watersalute/truck/front_steering_angle` | 度 | -45 ~ 45 | R/W | 前轮转向角（镜像同步） |
+| `watersalute/truck/rear_steering_angle` | 度 | -45 ~ 45 | R/W | 后轮转向角（镜像同步） |
 | `watersalute/truck/wheel_rotation_angle` | 度 | 0 ~ 360 | R | 车轮旋转角度（根据车速实时计算） |
-| `watersalute/truck/cannon_pitch` | 度 | 0 ~ 90 | R/W | 水炮俯仰角 |
-| `watersalute/truck/cannon_yaw` | 度 | -180 ~ 180 | R/W | 水炮偏航角 |
+| `watersalute/truck/cannon_pitch` | 度 | 0 ~ 90 | R/W | 水炮俯仰角（同步） |
+| `watersalute/truck/cannon_yaw` | 度 | -180 ~ 180 | R/W | 水炮偏航角（同步） |
 | `watersalute/truck/speed` | m/s | - | R | 车辆速度 |
 
 ## 转向系统
