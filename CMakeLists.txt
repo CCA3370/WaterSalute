@@ -70,10 +70,6 @@ elseif(APPLE)
     target_compile_options(WaterSalute PRIVATE
         -fvisibility=hidden
     )
-    set_target_properties(WaterSalute PROPERTIES
-        BUNDLE TRUE
-        BUNDLE_EXTENSION "xpl"
-    )
     target_link_options(WaterSalute PRIVATE
         -flat_namespace
         -undefined suppress
@@ -92,13 +88,20 @@ endif()
 set_target_properties(WaterSalute PROPERTIES
     PREFIX ""
     OUTPUT_NAME "WaterSalute"
+    SUFFIX ${XPLM_LIBRARY_SUFFIX}
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/WaterSalute"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/WaterSalute"
 )
 
-if(NOT APPLE)
-    set_target_properties(WaterSalute PROPERTIES
-        SUFFIX ${XPLM_LIBRARY_SUFFIX}
-    )
+# For multi-config generators (e.g. Visual Studio), ensure output goes directly to WaterSalute/
+if(CMAKE_CONFIGURATION_TYPES)
+    foreach(config ${CMAKE_CONFIGURATION_TYPES})
+        string(TOUPPER ${config} config_upper)
+        set_target_properties(WaterSalute PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/WaterSalute"
+            RUNTIME_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/WaterSalute"
+        )
+    endforeach()
 endif()
 
 # Copy resources to build directory
