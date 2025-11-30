@@ -33,6 +33,9 @@ IDX 3
 # Enable alpha blending for transparency
 ATTR_blend
 
+# Disable backface culling so particle is visible from both sides
+ATTR_no_cull
+
 # Use proper depth testing for correct layering with terrain
 ATTR_depth
 
