@@ -114,6 +114,41 @@ Modify the constants in `src/WaterSalute.cpp`:
 - `NUM_PARTICLES_PER_JET`: Particle density (default: 100)
 - `PARTICLE_LIFETIME`: How long particles last (default: 2 seconds)
 
+## Custom Datarefs
+
+The plugin publishes several custom datarefs that can be used by other plugins or tools to control and monitor the fire trucks:
+
+### Truck Control Datarefs
+
+All truck datarefs are float arrays with 2 elements (index 0 = left truck, index 1 = right truck).
+
+| Dataref | Type | Writable | Description |
+|---------|------|----------|-------------|
+| `watersalute/truck/steering_angle` | float[2] | Yes | Front wheel steering angle in degrees (-45 to 45) |
+| `watersalute/truck/wheel_rotation_speed` | float[2] | No | Wheel rotation speed in radians/second (calculated from speed) |
+| `watersalute/truck/cannon_pitch` | float[2] | Yes | Water cannon pitch angle in degrees (0 to 90) |
+| `watersalute/truck/cannon_yaw` | float[2] | Yes | Water cannon yaw angle in degrees (-180 to 180) |
+| `watersalute/truck/speed` | float[2] | No | Current truck speed in meters/second |
+
+### Example Usage
+
+These datarefs can be accessed by other plugins or dataref tools:
+
+```cpp
+// Get truck speed dataref
+XPLMDataRef speedRef = XPLMFindDataRef("watersalute/truck/speed");
+
+// Read left truck speed (index 0)
+float speeds[2];
+XPLMGetDatavf(speedRef, speeds, 0, 2);
+float leftTruckSpeed = speeds[0];
+
+// Set cannon pitch for right truck (index 1)
+XPLMDataRef pitchRef = XPLMFindDataRef("watersalute/truck/cannon_pitch");
+float pitchValues[1] = { 60.0f };  // 60 degree pitch
+XPLMSetDatavf(pitchRef, pitchValues, 1, 1);  // offset 1, count 1
+```
+
 ## License
 
 This project is open source. See LICENSE file for details.

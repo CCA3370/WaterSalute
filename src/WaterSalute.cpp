@@ -92,6 +92,11 @@ struct FireTruck {
     float nozzleOffsetX;     /* Nozzle position offset from truck center */
     float nozzleOffsetY;     /* Nozzle height */
     float nozzleOffsetZ;     /* Nozzle forward offset */
+    float steeringAngle;     /* Front wheel steering angle in degrees (-45 to 45) */
+    float wheelRotationSpeed;/* Wheel rotation speed in radians per second */
+    float cannonPitch;       /* Water cannon pitch angle in degrees (0 to 90) */
+    float cannonYaw;         /* Water cannon yaw angle in degrees (-180 to 180) */
+    float speed;             /* Current speed in m/s */
 };
 
 /* Global variables */
@@ -110,7 +115,7 @@ static XPLMFlightLoopID g_flightLoopId = nullptr;
 
 static bool g_drawCallbackRegistered = false;
 
-/* Datarefs */
+/* Datarefs from X-Plane */
 static XPLMDataRef g_drOnGround = nullptr;
 static XPLMDataRef g_drGroundSpeed = nullptr;
 static XPLMDataRef g_drLocalX = nullptr;
@@ -118,6 +123,24 @@ static XPLMDataRef g_drLocalY = nullptr;
 static XPLMDataRef g_drLocalZ = nullptr;
 static XPLMDataRef g_drHeading = nullptr;
 static XPLMDataRef g_drWingspan = nullptr;
+
+/* Custom datarefs published by this plugin */
+/* Fire truck control datarefs - left truck (index 0) and right truck (index 1) */
+static XPLMDataRef g_drTruckSteeringAngle = nullptr;    /* watersalute/truck/steering_angle - float array[2] */
+static XPLMDataRef g_drTruckWheelSpeed = nullptr;       /* watersalute/truck/wheel_rotation_speed - float array[2] */
+static XPLMDataRef g_drTruckCannonPitch = nullptr;      /* watersalute/truck/cannon_pitch - float array[2] */
+static XPLMDataRef g_drTruckCannonYaw = nullptr;        /* watersalute/truck/cannon_yaw - float array[2] */
+static XPLMDataRef g_drTruckSpeed = nullptr;            /* watersalute/truck/speed - float array[2] (read-only) */
+
+/* Wheel physics constants */
+static const float WHEEL_RADIUS = 0.5f;                 /* Wheel radius in meters */
+static const float MAX_STEERING_ANGLE = 45.0f;          /* Maximum steering angle in degrees */
+static const float MIN_CANNON_PITCH = 0.0f;             /* Minimum cannon pitch angle */
+static const float MAX_CANNON_PITCH = 90.0f;            /* Maximum cannon pitch angle */
+static const float DEFAULT_CANNON_PITCH = 45.0f;        /* Default cannon pitch angle for water arc */
+static const float PI = 3.14159265f;                    /* Pi constant */
+static const float DEG_TO_RAD = PI / 180.0f;            /* Degrees to radians conversion */
+static const float RAD_TO_DEG = 180.0f / PI;            /* Radians to degrees conversion */
 
 static char g_pluginPath[512];
 static char g_resourcePath[512];  /* Path to resources directory */
@@ -146,6 +169,129 @@ static bool LoadWaterDropModel();
 static int DrawWaterParticles(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon);
 static void RegisterDrawCallback();
 static void UnregisterDrawCallback();
+static void RegisterCustomDataRefs();
+static void UnregisterCustomDataRefs();
+
+/* Helper function to get truck by index (0 = left, 1 = right) */
+static FireTruck* GetTruckByIndex(int index) {
+    if (index == 0) return &g_leftTruck;
+    if (index == 1) return &g_rightTruck;
+    return nullptr;
+}
+
+/* Custom dataref callback functions */
+
+/* Steering angle accessor (float array[2]) */
+static int GetSteeringAngle(void* inRefcon, float* outValues, int inOffset, int inMax) {
+    (void)inRefcon;
+    if (outValues == nullptr) {
+        return 2; /* Return array size */
+    }
+    int count = 0;
+    for (int i = inOffset; i < 2 && count < inMax; i++, count++) {
+        FireTruck* truck = GetTruckByIndex(i);
+        outValues[count] = truck ? truck->steeringAngle : 0.0f;
+    }
+    return count;
+}
+
+static void SetSteeringAngle(void* inRefcon, float* inValues, int inOffset, int inCount) {
+    (void)inRefcon;
+    for (int i = 0; i < inCount && (inOffset + i) < 2; i++) {
+        FireTruck* truck = GetTruckByIndex(inOffset + i);
+        if (truck) {
+            /* Clamp steering angle to valid range */
+            float angle = inValues[i];
+            if (angle < -MAX_STEERING_ANGLE) angle = -MAX_STEERING_ANGLE;
+            if (angle > MAX_STEERING_ANGLE) angle = MAX_STEERING_ANGLE;
+            truck->steeringAngle = angle;
+        }
+    }
+}
+
+/* Wheel rotation speed accessor (float array[2]) - read-only, calculated from speed */
+static int GetWheelRotationSpeed(void* inRefcon, float* outValues, int inOffset, int inMax) {
+    (void)inRefcon;
+    if (outValues == nullptr) {
+        return 2; /* Return array size */
+    }
+    int count = 0;
+    for (int i = inOffset; i < 2 && count < inMax; i++, count++) {
+        FireTruck* truck = GetTruckByIndex(i);
+        outValues[count] = truck ? truck->wheelRotationSpeed : 0.0f;
+    }
+    return count;
+}
+
+/* Cannon pitch accessor (float array[2]) */
+static int GetCannonPitch(void* inRefcon, float* outValues, int inOffset, int inMax) {
+    (void)inRefcon;
+    if (outValues == nullptr) {
+        return 2; /* Return array size */
+    }
+    int count = 0;
+    for (int i = inOffset; i < 2 && count < inMax; i++, count++) {
+        FireTruck* truck = GetTruckByIndex(i);
+        outValues[count] = truck ? truck->cannonPitch : DEFAULT_CANNON_PITCH;
+    }
+    return count;
+}
+
+static void SetCannonPitch(void* inRefcon, float* inValues, int inOffset, int inCount) {
+    (void)inRefcon;
+    for (int i = 0; i < inCount && (inOffset + i) < 2; i++) {
+        FireTruck* truck = GetTruckByIndex(inOffset + i);
+        if (truck) {
+            /* Clamp cannon pitch to valid range */
+            float pitch = inValues[i];
+            if (pitch < MIN_CANNON_PITCH) pitch = MIN_CANNON_PITCH;
+            if (pitch > MAX_CANNON_PITCH) pitch = MAX_CANNON_PITCH;
+            truck->cannonPitch = pitch;
+        }
+    }
+}
+
+/* Cannon yaw accessor (float array[2]) */
+static int GetCannonYaw(void* inRefcon, float* outValues, int inOffset, int inMax) {
+    (void)inRefcon;
+    if (outValues == nullptr) {
+        return 2; /* Return array size */
+    }
+    int count = 0;
+    for (int i = inOffset; i < 2 && count < inMax; i++, count++) {
+        FireTruck* truck = GetTruckByIndex(i);
+        outValues[count] = truck ? truck->cannonYaw : 0.0f;
+    }
+    return count;
+}
+
+static void SetCannonYaw(void* inRefcon, float* inValues, int inOffset, int inCount) {
+    (void)inRefcon;
+    for (int i = 0; i < inCount && (inOffset + i) < 2; i++) {
+        FireTruck* truck = GetTruckByIndex(inOffset + i);
+        if (truck) {
+            /* Normalize yaw to -180 to 180 range */
+            float yaw = inValues[i];
+            while (yaw > 180.0f) yaw -= 360.0f;
+            while (yaw < -180.0f) yaw += 360.0f;
+            truck->cannonYaw = yaw;
+        }
+    }
+}
+
+/* Truck speed accessor (float array[2]) - read-only */
+static int GetTruckSpeed(void* inRefcon, float* outValues, int inOffset, int inMax) {
+    (void)inRefcon;
+    if (outValues == nullptr) {
+        return 2; /* Return array size */
+    }
+    int count = 0;
+    for (int i = inOffset; i < 2 && count < inMax; i++, count++) {
+        FireTruck* truck = GetTruckByIndex(i);
+        outValues[count] = truck ? truck->speed : 0.0f;
+    }
+    return count;
+}
 
 /* Debug logging */
 static void DebugLog(const char* format, ...) {
@@ -200,12 +346,154 @@ static void LogDebugStatus() {
     DebugLog("  Right Truck Position: (%.2f, %.2f, %.2f), Heading: %.1f, Positioned: %s",
              g_rightTruck.x, g_rightTruck.y, g_rightTruck.z, g_rightTruck.heading,
              g_rightTruck.positioned ? "YES" : "NO");
+    DebugLog("  Left Truck: Speed=%.2f m/s, WheelRot=%.2f rad/s, Steering=%.1f deg",
+             g_leftTruck.speed, g_leftTruck.wheelRotationSpeed, g_leftTruck.steeringAngle);
+    DebugLog("  Right Truck: Speed=%.2f m/s, WheelRot=%.2f rad/s, Steering=%.1f deg",
+             g_rightTruck.speed, g_rightTruck.wheelRotationSpeed, g_rightTruck.steeringAngle);
+    DebugLog("  Left Cannon: Pitch=%.1f deg, Yaw=%.1f deg", 
+             g_leftTruck.cannonPitch, g_leftTruck.cannonYaw);
+    DebugLog("  Right Cannon: Pitch=%.1f deg, Yaw=%.1f deg", 
+             g_rightTruck.cannonPitch, g_rightTruck.cannonYaw);
     DebugLog("  Left Truck Particles: %zu", g_leftTruck.particles.size());
     DebugLog("  Right Truck Particles: %zu", g_rightTruck.particles.size());
     DebugLog("  Draw Callback Registered: %s", g_drawCallbackRegistered ? "YES" : "NO");
     DebugLog("  Draw Callback Call Count: %d", g_drawCallbackCallCount);
     DebugLog("  Total Particles Emitted: %d", g_particlesEmittedTotal);
     DebugLog("===================");
+}
+
+/*
+ * RegisterCustomDataRefs - Register all custom datarefs for fire truck control
+ * 
+ * Datarefs created:
+ * - watersalute/truck/steering_angle: float array[2], read/write
+ *   Front wheel steering angle in degrees (-45 to 45)
+ *   Index 0 = left truck, Index 1 = right truck
+ * 
+ * - watersalute/truck/wheel_rotation_speed: float array[2], read-only
+ *   Wheel rotation speed in radians per second
+ *   Calculated based on truck speed and wheel radius
+ * 
+ * - watersalute/truck/cannon_pitch: float array[2], read/write
+ *   Water cannon pitch angle in degrees (0 to 90)
+ *   Used for controlling the elevation of water jet
+ * 
+ * - watersalute/truck/cannon_yaw: float array[2], read/write
+ *   Water cannon yaw angle in degrees (-180 to 180)
+ *   Used for controlling the horizontal direction of water jet
+ * 
+ * - watersalute/truck/speed: float array[2], read-only
+ *   Current truck speed in meters per second
+ */
+static void RegisterCustomDataRefs() {
+    DebugLog("Registering custom datarefs...");
+    
+    /* Steering angle - writable float array */
+    g_drTruckSteeringAngle = XPLMRegisterDataAccessor(
+        "watersalute/truck/steering_angle",
+        xplmType_FloatArray,
+        1, /* writable */
+        nullptr, nullptr,   /* int accessors */
+        nullptr, nullptr,   /* float accessors */
+        nullptr, nullptr,   /* double accessors */
+        nullptr, nullptr,   /* int array accessors */
+        GetSteeringAngle, SetSteeringAngle,  /* float array accessors */
+        nullptr, nullptr,   /* data accessors */
+        nullptr, nullptr    /* refcons */
+    );
+    DebugLog("  Registered: watersalute/truck/steering_angle");
+    
+    /* Wheel rotation speed - read-only float array (calculated from speed) */
+    g_drTruckWheelSpeed = XPLMRegisterDataAccessor(
+        "watersalute/truck/wheel_rotation_speed",
+        xplmType_FloatArray,
+        0, /* read-only */
+        nullptr, nullptr,   /* int accessors */
+        nullptr, nullptr,   /* float accessors */
+        nullptr, nullptr,   /* double accessors */
+        nullptr, nullptr,   /* int array accessors */
+        GetWheelRotationSpeed, nullptr,  /* float array accessors - read only */
+        nullptr, nullptr,   /* data accessors */
+        nullptr, nullptr    /* refcons */
+    );
+    DebugLog("  Registered: watersalute/truck/wheel_rotation_speed");
+    
+    /* Cannon pitch - writable float array */
+    g_drTruckCannonPitch = XPLMRegisterDataAccessor(
+        "watersalute/truck/cannon_pitch",
+        xplmType_FloatArray,
+        1, /* writable */
+        nullptr, nullptr,   /* int accessors */
+        nullptr, nullptr,   /* float accessors */
+        nullptr, nullptr,   /* double accessors */
+        nullptr, nullptr,   /* int array accessors */
+        GetCannonPitch, SetCannonPitch,  /* float array accessors */
+        nullptr, nullptr,   /* data accessors */
+        nullptr, nullptr    /* refcons */
+    );
+    DebugLog("  Registered: watersalute/truck/cannon_pitch");
+    
+    /* Cannon yaw - writable float array */
+    g_drTruckCannonYaw = XPLMRegisterDataAccessor(
+        "watersalute/truck/cannon_yaw",
+        xplmType_FloatArray,
+        1, /* writable */
+        nullptr, nullptr,   /* int accessors */
+        nullptr, nullptr,   /* float accessors */
+        nullptr, nullptr,   /* double accessors */
+        nullptr, nullptr,   /* int array accessors */
+        GetCannonYaw, SetCannonYaw,  /* float array accessors */
+        nullptr, nullptr,   /* data accessors */
+        nullptr, nullptr    /* refcons */
+    );
+    DebugLog("  Registered: watersalute/truck/cannon_yaw");
+    
+    /* Truck speed - read-only float array */
+    g_drTruckSpeed = XPLMRegisterDataAccessor(
+        "watersalute/truck/speed",
+        xplmType_FloatArray,
+        0, /* read-only */
+        nullptr, nullptr,   /* int accessors */
+        nullptr, nullptr,   /* float accessors */
+        nullptr, nullptr,   /* double accessors */
+        nullptr, nullptr,   /* int array accessors */
+        GetTruckSpeed, nullptr,  /* float array accessors - read only */
+        nullptr, nullptr,   /* data accessors */
+        nullptr, nullptr    /* refcons */
+    );
+    DebugLog("  Registered: watersalute/truck/speed");
+    
+    DebugLog("Custom datarefs registered successfully");
+}
+
+/*
+ * UnregisterCustomDataRefs - Unregister all custom datarefs
+ */
+static void UnregisterCustomDataRefs() {
+    DebugLog("Unregistering custom datarefs...");
+    
+    if (g_drTruckSteeringAngle) {
+        XPLMUnregisterDataAccessor(g_drTruckSteeringAngle);
+        g_drTruckSteeringAngle = nullptr;
+    }
+    if (g_drTruckWheelSpeed) {
+        XPLMUnregisterDataAccessor(g_drTruckWheelSpeed);
+        g_drTruckWheelSpeed = nullptr;
+    }
+    if (g_drTruckCannonPitch) {
+        XPLMUnregisterDataAccessor(g_drTruckCannonPitch);
+        g_drTruckCannonPitch = nullptr;
+    }
+    if (g_drTruckCannonYaw) {
+        XPLMUnregisterDataAccessor(g_drTruckCannonYaw);
+        g_drTruckCannonYaw = nullptr;
+    }
+    if (g_drTruckSpeed) {
+        XPLMUnregisterDataAccessor(g_drTruckSpeed);
+        g_drTruckSpeed = nullptr;
+    }
+    
+    DebugLog("Custom datarefs unregistered");
 }
 
 /*
@@ -272,6 +560,9 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     /* Load water droplet model for particle rendering */
     LoadWaterDropModel();
     
+    /* Register custom datarefs for fire truck control */
+    RegisterCustomDataRefs();
+    
     DebugLog("Plugin started successfully");
     
     return 1;
@@ -285,6 +576,9 @@ PLUGIN_API void XPluginStop(void) {
     
     /* Cleanup */
     UnregisterDrawCallback();
+    
+    /* Unregister custom datarefs */
+    UnregisterCustomDataRefs();
     
     if (g_flightLoopId) {
         XPLMDestroyFlightLoop(g_flightLoopId);
@@ -610,7 +904,7 @@ static void StartWaterSalute() {
     DebugLog("Truck spacing from center: %.1f meters", truckSpacing);
     
     /* Convert heading to radians */
-    float headingRad = acHeading * (3.14159265f / 180.0f);
+    float headingRad = acHeading * DEG_TO_RAD;
     
     /* Calculate forward vector (X-Plane uses -Z as forward) */
     float forwardX = -sinf(headingRad);
@@ -755,6 +1049,12 @@ static void InitializeTruck(FireTruck& truck) {
     truck.particles.clear();
     truck.particles.reserve(NUM_PARTICLES_PER_JET);
     truck.lastEmitTime = 0.0f;
+    /* Initialize new control properties */
+    truck.steeringAngle = 0.0f;
+    truck.wheelRotationSpeed = 0.0f;
+    truck.cannonPitch = DEFAULT_CANNON_PITCH;  /* Default pitch for water arc */
+    truck.cannonYaw = 0.0f;     /* Default facing forward relative to truck */
+    truck.speed = 0.0f;
 }
 
 /*
@@ -832,6 +1132,10 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
 static void UpdateTrucks(float dt) {
     auto updateTruckPosition = [dt](FireTruck& truck, bool& allPositioned) {
         if (truck.positioned) {
+            /* Truck is stationary */
+            truck.speed = 0.0f;
+            truck.wheelRotationSpeed = 0.0f;
+            truck.steeringAngle = 0.0f;
             return;
         }
         
@@ -842,28 +1146,62 @@ static void UpdateTrucks(float dt) {
         
         if (distance > 2.0f) {
             /* Move toward target */
-            float speed = TRUCK_APPROACH_SPEED * dt;
-            if (speed > distance) speed = distance;
+            float moveSpeed = TRUCK_APPROACH_SPEED;
+            float moveDistance = moveSpeed * dt;
+            if (moveDistance > distance) moveDistance = distance;
             
             float dirX = dx / distance;
             float dirZ = dz / distance;
             
-            truck.x += dirX * speed;
-            truck.z += dirZ * speed;
+            /* Store previous position for speed calculation */
+            double prevX = truck.x;
+            double prevZ = truck.z;
+            
+            truck.x += dirX * moveDistance;
+            truck.z += dirZ * moveDistance;
             truck.y = GetTerrainHeight(static_cast<float>(truck.x), static_cast<float>(truck.z));
             
+            /* Calculate actual speed based on distance moved */
+            float actualDx = static_cast<float>(truck.x - prevX);
+            float actualDz = static_cast<float>(truck.z - prevZ);
+            float actualDistance = sqrtf(actualDx * actualDx + actualDz * actualDz);
+            truck.speed = (dt > 0.0f) ? (actualDistance / dt) : 0.0f;
+            
+            /* Calculate wheel rotation speed from vehicle speed */
+            /* omega = v / r (angular velocity = linear velocity / wheel radius) */
+            truck.wheelRotationSpeed = truck.speed / WHEEL_RADIUS;
+            
+            /* Calculate desired heading */
+            float desiredHeading = atan2f(-dirX, -dirZ) * RAD_TO_DEG;
+            float headingDiff = desiredHeading - truck.heading;
+            while (headingDiff > 180.0f) headingDiff -= 360.0f;
+            while (headingDiff < -180.0f) headingDiff += 360.0f;
+            
+            /* Calculate steering angle based on heading difference */
+            /* Clamp steering angle to maximum */
+            truck.steeringAngle = headingDiff;
+            if (truck.steeringAngle > MAX_STEERING_ANGLE) truck.steeringAngle = MAX_STEERING_ANGLE;
+            if (truck.steeringAngle < -MAX_STEERING_ANGLE) truck.steeringAngle = -MAX_STEERING_ANGLE;
+            
             /* Update heading to face movement direction */
-            truck.heading = atan2f(-dirX, -dirZ) * (180.0f / 3.14159265f);
+            truck.heading = desiredHeading;
             
             allPositioned = false;
         } else {
             /* Reached position, now turn to face target heading */
+            truck.speed = 0.0f;
+            truck.wheelRotationSpeed = 0.0f;
+            
             float headingDiff = truck.targetHeading - truck.heading;
             while (headingDiff > 180.0f) headingDiff -= 360.0f;
             while (headingDiff < -180.0f) headingDiff += 360.0f;
             
             if (fabsf(headingDiff) > 1.0f) {
                 float turnRate = 45.0f * dt; /* degrees per second */
+                
+                /* Calculate steering angle for turning in place */
+                truck.steeringAngle = (headingDiff > 0) ? MAX_STEERING_ANGLE : -MAX_STEERING_ANGLE;
+                
                 if (headingDiff > 0) {
                     truck.heading += fminf(turnRate, headingDiff);
                 } else {
@@ -873,6 +1211,7 @@ static void UpdateTrucks(float dt) {
             } else {
                 truck.heading = truck.targetHeading;
                 truck.positioned = true;
+                truck.steeringAngle = 0.0f;
             }
         }
         
@@ -892,17 +1231,22 @@ static void UpdateTrucks(float dt) {
     
     auto updateTruckLeaving = [dt](FireTruck& truck) -> bool {
         /* Move away from current position */
-        float headingRad = truck.heading * (3.14159265f / 180.0f);
+        float headingRad = truck.heading * DEG_TO_RAD;
         float dirX = -sinf(headingRad);
         float dirZ = -cosf(headingRad);
         
         /* First turn around */
         truck.heading += 90.0f * dt;
+        truck.steeringAngle = MAX_STEERING_ANGLE; /* Full steering while turning */
         
         /* Then move forward */
-        float speed = TRUCK_APPROACH_SPEED * dt * 2.0f;
-        truck.x += dirX * speed;
-        truck.z += dirZ * speed;
+        float moveSpeed = TRUCK_APPROACH_SPEED * 2.0f;
+        float moveDistance = moveSpeed * dt;
+        truck.speed = moveSpeed;
+        truck.wheelRotationSpeed = truck.speed / WHEEL_RADIUS;
+        
+        truck.x += dirX * moveDistance;
+        truck.z += dirZ * moveDistance;
         truck.y = GetTerrainHeight(static_cast<float>(truck.x), static_cast<float>(truck.z));
         
         /* Update instance position */
@@ -921,9 +1265,9 @@ static void UpdateTrucks(float dt) {
         /* Check if far enough away (300 meters from start) */
         double acX = g_drLocalX ? XPLMGetDatad(g_drLocalX) : 0.0;
         double acZ = g_drLocalZ ? XPLMGetDatad(g_drLocalZ) : 0.0;
-        float dx = static_cast<float>(truck.x - acX);
-        float dz = static_cast<float>(truck.z - acZ);
-        float distFromAircraft = sqrtf(dx * dx + dz * dz);
+        float distDx = static_cast<float>(truck.x - acX);
+        float distDz = static_cast<float>(truck.z - acZ);
+        float distFromAircraft = sqrtf(distDx * distDx + distDz * distDz);
         
         return distFromAircraft > 600.0f;
     };
@@ -1078,7 +1422,7 @@ static void EmitParticle(FireTruck& truck) {
     }
     
     /* Calculate nozzle world position */
-    float headingRad = truck.heading * (3.14159265f / 180.0f);
+    float headingRad = truck.heading * DEG_TO_RAD;
     float cosH = cosf(headingRad);
     float sinH = sinf(headingRad);
     
