@@ -8,8 +8,8 @@ OBJ
 # Origin: Center bottom of truck
 # Facing: -Z direction (X-Plane convention)
 
-# No texture - using solid colors
-TEXTURE
+# Fire truck texture
+TEXTURE firetruck.png
 
 POINT_COUNTS 179 0 0 270
 
