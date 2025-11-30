@@ -137,6 +137,10 @@ static const float WHEEL_RADIUS = 0.5f;                 /* Wheel radius in meter
 static const float MAX_STEERING_ANGLE = 45.0f;          /* Maximum steering angle in degrees */
 static const float MIN_CANNON_PITCH = 0.0f;             /* Minimum cannon pitch angle */
 static const float MAX_CANNON_PITCH = 90.0f;            /* Maximum cannon pitch angle */
+static const float DEFAULT_CANNON_PITCH = 45.0f;        /* Default cannon pitch angle for water arc */
+static const float PI = 3.14159265f;                    /* Pi constant */
+static const float DEG_TO_RAD = PI / 180.0f;            /* Degrees to radians conversion */
+static const float RAD_TO_DEG = 180.0f / PI;            /* Radians to degrees conversion */
 
 static char g_pluginPath[512];
 static char g_resourcePath[512];  /* Path to resources directory */
@@ -228,7 +232,7 @@ static int GetCannonPitch(void* inRefcon, float* outValues, int inOffset, int in
     int count = 0;
     for (int i = inOffset; i < 2 && count < inMax; i++, count++) {
         FireTruck* truck = GetTruckByIndex(i);
-        outValues[count] = truck ? truck->cannonPitch : 45.0f; /* Default 45 degrees */
+        outValues[count] = truck ? truck->cannonPitch : DEFAULT_CANNON_PITCH;
     }
     return count;
 }
@@ -900,7 +904,7 @@ static void StartWaterSalute() {
     DebugLog("Truck spacing from center: %.1f meters", truckSpacing);
     
     /* Convert heading to radians */
-    float headingRad = acHeading * (3.14159265f / 180.0f);
+    float headingRad = acHeading * DEG_TO_RAD;
     
     /* Calculate forward vector (X-Plane uses -Z as forward) */
     float forwardX = -sinf(headingRad);
@@ -1048,7 +1052,7 @@ static void InitializeTruck(FireTruck& truck) {
     /* Initialize new control properties */
     truck.steeringAngle = 0.0f;
     truck.wheelRotationSpeed = 0.0f;
-    truck.cannonPitch = 45.0f;  /* Default 45 degree pitch for water arc */
+    truck.cannonPitch = DEFAULT_CANNON_PITCH;  /* Default pitch for water arc */
     truck.cannonYaw = 0.0f;     /* Default facing forward relative to truck */
     truck.speed = 0.0f;
 }
@@ -1168,7 +1172,7 @@ static void UpdateTrucks(float dt) {
             truck.wheelRotationSpeed = truck.speed / WHEEL_RADIUS;
             
             /* Calculate desired heading */
-            float desiredHeading = atan2f(-dirX, -dirZ) * (180.0f / 3.14159265f);
+            float desiredHeading = atan2f(-dirX, -dirZ) * RAD_TO_DEG;
             float headingDiff = desiredHeading - truck.heading;
             while (headingDiff > 180.0f) headingDiff -= 360.0f;
             while (headingDiff < -180.0f) headingDiff += 360.0f;
@@ -1227,7 +1231,7 @@ static void UpdateTrucks(float dt) {
     
     auto updateTruckLeaving = [dt](FireTruck& truck) -> bool {
         /* Move away from current position */
-        float headingRad = truck.heading * (3.14159265f / 180.0f);
+        float headingRad = truck.heading * DEG_TO_RAD;
         float dirX = -sinf(headingRad);
         float dirZ = -cosf(headingRad);
         
@@ -1418,7 +1422,7 @@ static void EmitParticle(FireTruck& truck) {
     }
     
     /* Calculate nozzle world position */
-    float headingRad = truck.heading * (3.14159265f / 180.0f);
+    float headingRad = truck.heading * DEG_TO_RAD;
     float cosH = cosf(headingRad);
     float sinH = sinf(headingRad);
     
