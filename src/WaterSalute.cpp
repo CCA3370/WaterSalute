@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cerrno>
+#include <ctime>
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -836,6 +837,8 @@ PLUGIN_API void XPluginStop(void) {
  * XPluginEnable - Called when the plugin is enabled
  */
 PLUGIN_API int XPluginEnable(void) {
+    /* Seed random number generator for particle effects */
+    srand(static_cast<unsigned int>(time(nullptr)));
     DebugLog("Plugin enabled");
     return 1;
 }
@@ -1762,7 +1765,7 @@ static void EmitParticle(FireTruck& truck) {
     float horizontalSpeed = baseSpeed * cosf(cannonPitchRad);
     float verticalSpeed = baseSpeed * sinf(cannonPitchRad);
     
-    /* Add spread like PSS INITIAL_HEADING variation (±5 degrees) */
+    /* Add spread like PSS INITIAL_HEADING variation (±10 degrees heading, ±5 degrees pitch) */
     float headingSpread = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 10.0f * DEG_TO_RAD;
     float pitchSpread = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 5.0f * DEG_TO_RAD;
     
