@@ -95,6 +95,7 @@ static const float PATH_REACH_THRESHOLD = 5.0f;    /* Distance to consider a way
 static const float BEZIER_SMOOTHING_FACTOR = 0.25f; /* Control point distance as fraction of segment length */
 static const int MAX_PATH_NODES = 500;             /* Maximum number of nodes in a planned path */
 static const double EARTH_RADIUS_METERS = 6371000.0; /* Earth radius for lat/lon to meters conversion */
+static const float MIN_STEERING_TANGENT = 0.01f;   /* Minimum tangent value to prevent division by zero in turn radius calc */
 
 /*
  * Road Network Data Structures for apt.dat parsing
@@ -1309,13 +1310,13 @@ static void StartWaterSalute() {
     
     /* Try to load road network from apt.dat */
     bool roadNetworkLoaded = false;
-    if (acLat != 0.0 || acLon != 0.0) {
-        roadNetworkLoaded = LoadAptDat(acLat, acLon);
-        if (roadNetworkLoaded) {
-            DebugLog("Road network loaded successfully for airport %s", g_roadNetwork.airportId.c_str());
-        } else {
-            DebugLog("Road network not available, using direct approach");
-        }
+    /* Always try to load road network - lat/lon 0,0 is a valid location (Gulf of Guinea) 
+     * The LoadAptDat function will search for nearby airports regardless */
+    roadNetworkLoaded = LoadAptDat(acLat, acLon);
+    if (roadNetworkLoaded) {
+        DebugLog("Road network loaded successfully for airport %s", g_roadNetwork.airportId.c_str());
+    } else {
+        DebugLog("Road network not available, using direct approach");
     }
     
     /* Calculate truck spacing (wingspan + 40 meters) */
@@ -2315,8 +2316,8 @@ static bool LoadAptDat(double acLat, double acLon) {
     /* Build path to apt.dat - try several common locations */
     std::vector<std::string> aptDatPaths;
     
-    /* Standard apt.dat location */
-    aptDatPaths.push_back(std::string(systemPath) + "Resources/default scenery/default apt dat/Earth nav data/apt.dat");
+    /* Standard apt.dat locations for X-Plane 11/12 */
+    aptDatPaths.push_back(std::string(systemPath) + "Resources/default scenery/default apt data/Earth nav data/apt.dat");
     aptDatPaths.push_back(std::string(systemPath) + "Custom Scenery/Global Airports/Earth nav data/apt.dat");
     aptDatPaths.push_back(std::string(systemPath) + "Resources/default data/apt.dat");
     
@@ -2466,8 +2467,8 @@ static bool LoadAptDat(double acLat, double acLon) {
                 edge.node1Idx = it1->second;
                 edge.node2Idx = it2->second;
                 edge.isOneWay = (direction == "oneway");
-                /* Check if fire_truck is allowed */
-                edge.isFireTruckRoute = (truckTypes.find("fire") != std::string::npos) ||
+                /* Check if fire_truck is allowed - match exact "fire_truck" or empty (all trucks) */
+                edge.isFireTruckRoute = (truckTypes.find("fire_truck") != std::string::npos) ||
                                         truckTypes.empty();  /* Empty means all trucks allowed */
                 edge.surfaceType = "service_road";
                 edge.length = 0.0f;
@@ -2617,9 +2618,9 @@ static bool FindPath(size_t startNode, size_t goalNode, std::vector<size_t>& pat
         openSet.pop();
         
         if (current.nodeIndex == goalNode) {
-            /* Reconstruct path */
+            /* Reconstruct path - walk from goal back to start */
             size_t node = goalNode;
-            while (node != SIZE_MAX && cameFrom.find(node) != cameFrom.end()) {
+            while (node != startNode && cameFrom.find(node) != cameFrom.end()) {
                 path.push_back(node);
                 node = cameFrom[node];
             }
@@ -3003,7 +3004,7 @@ static void UpdateTruckFollowingPath(FireTruck& truck, float dt) {
     truck.rearSteeringAngle = CalculateRearSteeringAngle(truck.frontSteeringAngle);
     
     /* Calculate minimum turn radius and adjust speed */
-    float turnRadius = WHEELBASE / fabsf(tanf(truck.frontSteeringAngle * DEG_TO_RAD) + 0.01f);
+    float turnRadius = WHEELBASE / fabsf(tanf(truck.frontSteeringAngle * DEG_TO_RAD) + MIN_STEERING_TANGENT);
     
     /* Speed control: slower for tighter turns and approaching waypoints */
     float maxSpeedForTurn = sqrtf(turnRadius * 2.0f); /* Simple physics approximation */
