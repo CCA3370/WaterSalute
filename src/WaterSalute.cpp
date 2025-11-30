@@ -92,8 +92,9 @@ struct FireTruck {
     float nozzleOffsetX;     /* Nozzle position offset from truck center */
     float nozzleOffsetY;     /* Nozzle height */
     float nozzleOffsetZ;     /* Nozzle forward offset */
-    float steeringAngle;     /* Front wheel steering angle in degrees (-45 to 45) */
-    float wheelRotationSpeed;/* Wheel rotation speed in radians per second */
+    float frontSteeringAngle;     /* Front axles steering angle in degrees (-45 to 45), negative when turning left */
+    float rearSteeringAngle;      /* Rear axle steering angle in degrees (-45 to 45), positive when turning left (counter-steering) */
+    float wheelRotationAngle;     /* Wheel rotation angle in degrees (0-360°), updated based on vehicle speed */
     float cannonPitch;       /* Water cannon pitch angle in degrees (0 to 90) */
     float cannonYaw;         /* Water cannon yaw angle in degrees (-180 to 180) */
     float speed;             /* Current speed in m/s */
@@ -126,11 +127,12 @@ static XPLMDataRef g_drWingspan = nullptr;
 
 /* Custom datarefs published by this plugin */
 /* Fire truck control datarefs - left truck (index 0) and right truck (index 1) */
-static XPLMDataRef g_drTruckSteeringAngle = nullptr;    /* watersalute/truck/steering_angle - float array[2] */
-static XPLMDataRef g_drTruckWheelSpeed = nullptr;       /* watersalute/truck/wheel_rotation_speed - float array[2] */
-static XPLMDataRef g_drTruckCannonPitch = nullptr;      /* watersalute/truck/cannon_pitch - float array[2] */
-static XPLMDataRef g_drTruckCannonYaw = nullptr;        /* watersalute/truck/cannon_yaw - float array[2] */
-static XPLMDataRef g_drTruckSpeed = nullptr;            /* watersalute/truck/speed - float array[2] (read-only) */
+static XPLMDataRef g_drTruckFrontSteeringAngle = nullptr;  /* watersalute/truck/front_steering_angle - float array[2] */
+static XPLMDataRef g_drTruckRearSteeringAngle = nullptr;   /* watersalute/truck/rear_steering_angle - float array[2] */
+static XPLMDataRef g_drTruckWheelAngle = nullptr;          /* watersalute/truck/wheel_rotation_angle - float array[2] */
+static XPLMDataRef g_drTruckCannonPitch = nullptr;         /* watersalute/truck/cannon_pitch - float array[2] */
+static XPLMDataRef g_drTruckCannonYaw = nullptr;           /* watersalute/truck/cannon_yaw - float array[2] */
+static XPLMDataRef g_drTruckSpeed = nullptr;               /* watersalute/truck/speed - float array[2] (read-only) */
 
 /* Wheel physics constants */
 static const float WHEEL_RADIUS = 0.5f;                 /* Wheel radius in meters */
@@ -181,8 +183,8 @@ static FireTruck* GetTruckByIndex(int index) {
 
 /* Custom dataref callback functions */
 
-/* Steering angle accessor (float array[2]) */
-static int GetSteeringAngle(void* inRefcon, float* outValues, int inOffset, int inMax) {
+/* Front axles steering angle accessor (float array[2]) - for 8x8 truck, front two bogies share this */
+static int GetFrontSteeringAngle(void* inRefcon, float* outValues, int inOffset, int inMax) {
     (void)inRefcon;
     if (outValues == nullptr) {
         return 2; /* Return array size */
@@ -190,12 +192,12 @@ static int GetSteeringAngle(void* inRefcon, float* outValues, int inOffset, int 
     int count = 0;
     for (int i = inOffset; i < 2 && count < inMax; i++, count++) {
         FireTruck* truck = GetTruckByIndex(i);
-        outValues[count] = truck ? truck->steeringAngle : 0.0f;
+        outValues[count] = truck ? truck->frontSteeringAngle : 0.0f;
     }
     return count;
 }
 
-static void SetSteeringAngle(void* inRefcon, float* inValues, int inOffset, int inCount) {
+static void SetFrontSteeringAngle(void* inRefcon, float* inValues, int inOffset, int inCount) {
     (void)inRefcon;
     for (int i = 0; i < inCount && (inOffset + i) < 2; i++) {
         FireTruck* truck = GetTruckByIndex(inOffset + i);
@@ -204,13 +206,13 @@ static void SetSteeringAngle(void* inRefcon, float* inValues, int inOffset, int 
             float angle = inValues[i];
             if (angle < -MAX_STEERING_ANGLE) angle = -MAX_STEERING_ANGLE;
             if (angle > MAX_STEERING_ANGLE) angle = MAX_STEERING_ANGLE;
-            truck->steeringAngle = angle;
+            truck->frontSteeringAngle = angle;
         }
     }
 }
 
-/* Wheel rotation speed accessor (float array[2]) - read-only, calculated from speed */
-static int GetWheelRotationSpeed(void* inRefcon, float* outValues, int inOffset, int inMax) {
+/* Rear axle steering angle accessor (float array[2]) - for 8x8 truck counter-steering */
+static int GetRearSteeringAngle(void* inRefcon, float* outValues, int inOffset, int inMax) {
     (void)inRefcon;
     if (outValues == nullptr) {
         return 2; /* Return array size */
@@ -218,7 +220,35 @@ static int GetWheelRotationSpeed(void* inRefcon, float* outValues, int inOffset,
     int count = 0;
     for (int i = inOffset; i < 2 && count < inMax; i++, count++) {
         FireTruck* truck = GetTruckByIndex(i);
-        outValues[count] = truck ? truck->wheelRotationSpeed : 0.0f;
+        outValues[count] = truck ? truck->rearSteeringAngle : 0.0f;
+    }
+    return count;
+}
+
+static void SetRearSteeringAngle(void* inRefcon, float* inValues, int inOffset, int inCount) {
+    (void)inRefcon;
+    for (int i = 0; i < inCount && (inOffset + i) < 2; i++) {
+        FireTruck* truck = GetTruckByIndex(inOffset + i);
+        if (truck) {
+            /* Clamp steering angle to valid range */
+            float angle = inValues[i];
+            if (angle < -MAX_STEERING_ANGLE) angle = -MAX_STEERING_ANGLE;
+            if (angle > MAX_STEERING_ANGLE) angle = MAX_STEERING_ANGLE;
+            truck->rearSteeringAngle = angle;
+        }
+    }
+}
+
+/* Wheel rotation angle accessor (float array[2]) - read-only, calculated from speed in real-time (0-360°) */
+static int GetWheelRotationAngle(void* inRefcon, float* outValues, int inOffset, int inMax) {
+    (void)inRefcon;
+    if (outValues == nullptr) {
+        return 2; /* Return array size */
+    }
+    int count = 0;
+    for (int i = inOffset; i < 2 && count < inMax; i++, count++) {
+        FireTruck* truck = GetTruckByIndex(i);
+        outValues[count] = truck ? truck->wheelRotationAngle : 0.0f;
     }
     return count;
 }
@@ -346,10 +376,10 @@ static void LogDebugStatus() {
     DebugLog("  Right Truck Position: (%.2f, %.2f, %.2f), Heading: %.1f, Positioned: %s",
              g_rightTruck.x, g_rightTruck.y, g_rightTruck.z, g_rightTruck.heading,
              g_rightTruck.positioned ? "YES" : "NO");
-    DebugLog("  Left Truck: Speed=%.2f m/s, WheelRot=%.2f rad/s, Steering=%.1f deg",
-             g_leftTruck.speed, g_leftTruck.wheelRotationSpeed, g_leftTruck.steeringAngle);
-    DebugLog("  Right Truck: Speed=%.2f m/s, WheelRot=%.2f rad/s, Steering=%.1f deg",
-             g_rightTruck.speed, g_rightTruck.wheelRotationSpeed, g_rightTruck.steeringAngle);
+    DebugLog("  Left Truck: Speed=%.2f m/s, WheelAngle=%.1f deg, FrontSteer=%.1f deg, RearSteer=%.1f deg",
+             g_leftTruck.speed, g_leftTruck.wheelRotationAngle, g_leftTruck.frontSteeringAngle, g_leftTruck.rearSteeringAngle);
+    DebugLog("  Right Truck: Speed=%.2f m/s, WheelAngle=%.1f deg, FrontSteer=%.1f deg, RearSteer=%.1f deg",
+             g_rightTruck.speed, g_rightTruck.wheelRotationAngle, g_rightTruck.frontSteeringAngle, g_rightTruck.rearSteeringAngle);
     DebugLog("  Left Cannon: Pitch=%.1f deg, Yaw=%.1f deg", 
              g_leftTruck.cannonPitch, g_leftTruck.cannonYaw);
     DebugLog("  Right Cannon: Pitch=%.1f deg, Yaw=%.1f deg", 
@@ -366,13 +396,21 @@ static void LogDebugStatus() {
  * RegisterCustomDataRefs - Register all custom datarefs for fire truck control
  * 
  * Datarefs created:
- * - watersalute/truck/steering_angle: float array[2], read/write
- *   Front wheel steering angle in degrees (-45 to 45)
+ * - watersalute/truck/front_steering_angle: float array[2], read/write
+ *   Front axles steering angle in degrees (-45 to 45)
+ *   For 8x8 truck, front two bogies share this angle
+ *   Negative when turning left, positive when turning right
  *   Index 0 = left truck, Index 1 = right truck
  * 
- * - watersalute/truck/wheel_rotation_speed: float array[2], read-only
- *   Wheel rotation speed in radians per second
- *   Calculated based on truck speed and wheel radius
+ * - watersalute/truck/rear_steering_angle: float array[2], read/write
+ *   Rear axle steering angle in degrees (-45 to 45)
+ *   Counter-steering for better maneuverability
+ *   Positive when turning left, negative when turning right (opposite to front)
+ *   Index 0 = left truck, Index 1 = right truck
+ * 
+ * - watersalute/truck/wheel_rotation_angle: float array[2], read-only
+ *   Wheel rotation angle in degrees (0-360°)
+ *   Calculated in real-time based on truck speed and wheel radius
  * 
  * - watersalute/truck/cannon_pitch: float array[2], read/write
  *   Water cannon pitch angle in degrees (0 to 90)
@@ -388,35 +426,50 @@ static void LogDebugStatus() {
 static void RegisterCustomDataRefs() {
     DebugLog("Registering custom datarefs...");
     
-    /* Steering angle - writable float array */
-    g_drTruckSteeringAngle = XPLMRegisterDataAccessor(
-        "watersalute/truck/steering_angle",
+    /* Front axles steering angle - writable float array */
+    g_drTruckFrontSteeringAngle = XPLMRegisterDataAccessor(
+        "watersalute/truck/front_steering_angle",
         xplmType_FloatArray,
         1, /* writable */
         nullptr, nullptr,   /* int accessors */
         nullptr, nullptr,   /* float accessors */
         nullptr, nullptr,   /* double accessors */
         nullptr, nullptr,   /* int array accessors */
-        GetSteeringAngle, SetSteeringAngle,  /* float array accessors */
+        GetFrontSteeringAngle, SetFrontSteeringAngle,  /* float array accessors */
         nullptr, nullptr,   /* data accessors */
         nullptr, nullptr    /* refcons */
     );
-    DebugLog("  Registered: watersalute/truck/steering_angle");
+    DebugLog("  Registered: watersalute/truck/front_steering_angle");
     
-    /* Wheel rotation speed - read-only float array (calculated from speed) */
-    g_drTruckWheelSpeed = XPLMRegisterDataAccessor(
-        "watersalute/truck/wheel_rotation_speed",
+    /* Rear axle steering angle - writable float array */
+    g_drTruckRearSteeringAngle = XPLMRegisterDataAccessor(
+        "watersalute/truck/rear_steering_angle",
+        xplmType_FloatArray,
+        1, /* writable */
+        nullptr, nullptr,   /* int accessors */
+        nullptr, nullptr,   /* float accessors */
+        nullptr, nullptr,   /* double accessors */
+        nullptr, nullptr,   /* int array accessors */
+        GetRearSteeringAngle, SetRearSteeringAngle,  /* float array accessors */
+        nullptr, nullptr,   /* data accessors */
+        nullptr, nullptr    /* refcons */
+    );
+    DebugLog("  Registered: watersalute/truck/rear_steering_angle");
+    
+    /* Wheel rotation angle - read-only float array (calculated from speed) */
+    g_drTruckWheelAngle = XPLMRegisterDataAccessor(
+        "watersalute/truck/wheel_rotation_angle",
         xplmType_FloatArray,
         0, /* read-only */
         nullptr, nullptr,   /* int accessors */
         nullptr, nullptr,   /* float accessors */
         nullptr, nullptr,   /* double accessors */
         nullptr, nullptr,   /* int array accessors */
-        GetWheelRotationSpeed, nullptr,  /* float array accessors - read only */
+        GetWheelRotationAngle, nullptr,  /* float array accessors - read only */
         nullptr, nullptr,   /* data accessors */
         nullptr, nullptr    /* refcons */
     );
-    DebugLog("  Registered: watersalute/truck/wheel_rotation_speed");
+    DebugLog("  Registered: watersalute/truck/wheel_rotation_angle");
     
     /* Cannon pitch - writable float array */
     g_drTruckCannonPitch = XPLMRegisterDataAccessor(
@@ -472,13 +525,17 @@ static void RegisterCustomDataRefs() {
 static void UnregisterCustomDataRefs() {
     DebugLog("Unregistering custom datarefs...");
     
-    if (g_drTruckSteeringAngle) {
-        XPLMUnregisterDataAccessor(g_drTruckSteeringAngle);
-        g_drTruckSteeringAngle = nullptr;
+    if (g_drTruckFrontSteeringAngle) {
+        XPLMUnregisterDataAccessor(g_drTruckFrontSteeringAngle);
+        g_drTruckFrontSteeringAngle = nullptr;
     }
-    if (g_drTruckWheelSpeed) {
-        XPLMUnregisterDataAccessor(g_drTruckWheelSpeed);
-        g_drTruckWheelSpeed = nullptr;
+    if (g_drTruckRearSteeringAngle) {
+        XPLMUnregisterDataAccessor(g_drTruckRearSteeringAngle);
+        g_drTruckRearSteeringAngle = nullptr;
+    }
+    if (g_drTruckWheelAngle) {
+        XPLMUnregisterDataAccessor(g_drTruckWheelAngle);
+        g_drTruckWheelAngle = nullptr;
     }
     if (g_drTruckCannonPitch) {
         XPLMUnregisterDataAccessor(g_drTruckCannonPitch);
@@ -1049,9 +1106,10 @@ static void InitializeTruck(FireTruck& truck) {
     truck.particles.clear();
     truck.particles.reserve(NUM_PARTICLES_PER_JET);
     truck.lastEmitTime = 0.0f;
-    /* Initialize new control properties */
-    truck.steeringAngle = 0.0f;
-    truck.wheelRotationSpeed = 0.0f;
+    /* Initialize wheel and steering control properties */
+    truck.frontSteeringAngle = 0.0f;  /* Front axles steering (negative = left turn) */
+    truck.rearSteeringAngle = 0.0f;   /* Rear axle steering (positive = left turn, counter-steer) */
+    truck.wheelRotationAngle = 0.0f;  /* Wheel rotation angle 0-360° */
     truck.cannonPitch = DEFAULT_CANNON_PITCH;  /* Default pitch for water arc */
     truck.cannonYaw = 0.0f;     /* Default facing forward relative to truck */
     truck.speed = 0.0f;
@@ -1134,8 +1192,9 @@ static void UpdateTrucks(float dt) {
         if (truck.positioned) {
             /* Truck is stationary */
             truck.speed = 0.0f;
-            truck.wheelRotationSpeed = 0.0f;
-            truck.steeringAngle = 0.0f;
+            truck.frontSteeringAngle = 0.0f;
+            truck.rearSteeringAngle = 0.0f;
+            /* Wheel rotation angle stays at current value when stopped */
             return;
         }
         
@@ -1167,9 +1226,21 @@ static void UpdateTrucks(float dt) {
             float actualDistance = sqrtf(actualDx * actualDx + actualDz * actualDz);
             truck.speed = (dt > 0.0f) ? (actualDistance / dt) : 0.0f;
             
-            /* Calculate wheel rotation speed from vehicle speed */
-            /* omega = v / r (angular velocity = linear velocity / wheel radius) */
-            truck.wheelRotationSpeed = truck.speed / WHEEL_RADIUS;
+            /* Calculate wheel rotation angle from vehicle speed (0-360°) */
+            /* Angular displacement = distance / wheel_radius (in radians) */
+            /* Convert to degrees and accumulate, wrapping at 360° */
+            if (truck.speed > 0.0f && dt > 0.0f) {
+                float angularDisplacementRad = actualDistance / WHEEL_RADIUS;
+                float angularDisplacementDeg = angularDisplacementRad * RAD_TO_DEG;
+                truck.wheelRotationAngle += angularDisplacementDeg;
+                /* Normalize to 0-360° range */
+                while (truck.wheelRotationAngle >= 360.0f) {
+                    truck.wheelRotationAngle -= 360.0f;
+                }
+                while (truck.wheelRotationAngle < 0.0f) {
+                    truck.wheelRotationAngle += 360.0f;
+                }
+            }
             
             /* Calculate desired heading */
             float desiredHeading = atan2f(-dirX, -dirZ) * RAD_TO_DEG;
@@ -1177,11 +1248,34 @@ static void UpdateTrucks(float dt) {
             while (headingDiff > 180.0f) headingDiff -= 360.0f;
             while (headingDiff < -180.0f) headingDiff += 360.0f;
             
-            /* Calculate steering angle based on heading difference */
-            /* Clamp steering angle to maximum */
-            truck.steeringAngle = headingDiff;
-            if (truck.steeringAngle > MAX_STEERING_ANGLE) truck.steeringAngle = MAX_STEERING_ANGLE;
-            if (truck.steeringAngle < -MAX_STEERING_ANGLE) truck.steeringAngle = -MAX_STEERING_ANGLE;
+            /* Calculate steering angles for 8x8 truck with counter-steering rear axle
+             * Front axles (first two bogies): turn in the direction of the turn
+             * Rear axle: counter-steer (turn opposite direction) for better maneuverability
+             * 
+             * Sign convention:
+             * - headingDiff < 0: turning left (counter-clockwise)
+             * - headingDiff > 0: turning right (clockwise)
+             * 
+             * For left turn (headingDiff < 0):
+             * - Front axles: negative angle (wheels turn left)
+             * - Rear axle: positive angle (wheels turn right, counter-steer)
+             * 
+             * For right turn (headingDiff > 0):
+             * - Front axles: positive angle (wheels turn right)
+             * - Rear axle: negative angle (wheels turn left, counter-steer)
+             */
+            
+            /* Front axles steering angle (same direction as turn) */
+            truck.frontSteeringAngle = headingDiff;
+            if (truck.frontSteeringAngle > MAX_STEERING_ANGLE) truck.frontSteeringAngle = MAX_STEERING_ANGLE;
+            if (truck.frontSteeringAngle < -MAX_STEERING_ANGLE) truck.frontSteeringAngle = -MAX_STEERING_ANGLE;
+            
+            /* Rear axle steering angle (opposite direction for counter-steering) */
+            /* Use a smaller ratio (typically 0.3-0.5) for rear axle counter-steering */
+            const float REAR_STEER_RATIO = 0.4f;
+            truck.rearSteeringAngle = -headingDiff * REAR_STEER_RATIO;
+            if (truck.rearSteeringAngle > MAX_STEERING_ANGLE) truck.rearSteeringAngle = MAX_STEERING_ANGLE;
+            if (truck.rearSteeringAngle < -MAX_STEERING_ANGLE) truck.rearSteeringAngle = -MAX_STEERING_ANGLE;
             
             /* Update heading to face movement direction */
             truck.heading = desiredHeading;
@@ -1190,7 +1284,7 @@ static void UpdateTrucks(float dt) {
         } else {
             /* Reached position, now turn to face target heading */
             truck.speed = 0.0f;
-            truck.wheelRotationSpeed = 0.0f;
+            /* Keep wheel angle at current position when stopped */
             
             float headingDiff = truck.targetHeading - truck.heading;
             while (headingDiff > 180.0f) headingDiff -= 360.0f;
@@ -1199,8 +1293,11 @@ static void UpdateTrucks(float dt) {
             if (fabsf(headingDiff) > 1.0f) {
                 float turnRate = 45.0f * dt; /* degrees per second */
                 
-                /* Calculate steering angle for turning in place */
-                truck.steeringAngle = (headingDiff > 0) ? MAX_STEERING_ANGLE : -MAX_STEERING_ANGLE;
+                /* Calculate steering angles for turning in place */
+                /* Front axles: full steering in turn direction */
+                truck.frontSteeringAngle = (headingDiff > 0) ? MAX_STEERING_ANGLE : -MAX_STEERING_ANGLE;
+                /* Rear axle: counter-steer (opposite direction) */
+                truck.rearSteeringAngle = (headingDiff > 0) ? -MAX_STEERING_ANGLE : MAX_STEERING_ANGLE;
                 
                 if (headingDiff > 0) {
                     truck.heading += fminf(turnRate, headingDiff);
@@ -1211,7 +1308,8 @@ static void UpdateTrucks(float dt) {
             } else {
                 truck.heading = truck.targetHeading;
                 truck.positioned = true;
-                truck.steeringAngle = 0.0f;
+                truck.frontSteeringAngle = 0.0f;
+                truck.rearSteeringAngle = 0.0f;
             }
         }
         
@@ -1235,15 +1333,29 @@ static void UpdateTrucks(float dt) {
         float dirX = -sinf(headingRad);
         float dirZ = -cosf(headingRad);
         
-        /* First turn around */
+        /* First turn around - turning right (positive heading change) */
         truck.heading += 90.0f * dt;
-        truck.steeringAngle = MAX_STEERING_ANGLE; /* Full steering while turning */
+        /* Front axles: positive steering for right turn */
+        truck.frontSteeringAngle = MAX_STEERING_ANGLE;
+        /* Rear axle: negative steering for counter-steer during right turn */
+        truck.rearSteeringAngle = -MAX_STEERING_ANGLE * 0.4f;
         
         /* Then move forward */
         float moveSpeed = TRUCK_APPROACH_SPEED * 2.0f;
         float moveDistance = moveSpeed * dt;
         truck.speed = moveSpeed;
-        truck.wheelRotationSpeed = truck.speed / WHEEL_RADIUS;
+        
+        /* Update wheel rotation angle based on distance moved */
+        float angularDisplacementRad = moveDistance / WHEEL_RADIUS;
+        float angularDisplacementDeg = angularDisplacementRad * RAD_TO_DEG;
+        truck.wheelRotationAngle += angularDisplacementDeg;
+        /* Normalize to 0-360° range */
+        while (truck.wheelRotationAngle >= 360.0f) {
+            truck.wheelRotationAngle -= 360.0f;
+        }
+        while (truck.wheelRotationAngle < 0.0f) {
+            truck.wheelRotationAngle += 360.0f;
+        }
         
         truck.x += dirX * moveDistance;
         truck.z += dirZ * moveDistance;
