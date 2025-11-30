@@ -21,6 +21,7 @@
 #include <cstdarg>
 #include <cerrno>
 #include <ctime>
+#include <random>
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -129,6 +130,10 @@ static XPLMProbeRef g_terrainProbe = nullptr;
 static XPLMFlightLoopID g_flightLoopId = nullptr;
 
 static bool g_drawCallbackRegistered = false;
+
+/* Fast random number generator for particle effects */
+static std::mt19937 g_rng;
+static std::uniform_real_distribution<float> g_randomDist(-0.5f, 0.5f);
 
 /* Datarefs from X-Plane */
 static XPLMDataRef g_drOnGround = nullptr;
@@ -837,8 +842,10 @@ PLUGIN_API void XPluginStop(void) {
  * XPluginEnable - Called when the plugin is enabled
  */
 PLUGIN_API int XPluginEnable(void) {
-    /* Seed random number generator for particle effects */
-    srand(static_cast<unsigned int>(time(nullptr)));
+    /* Seed random number generators for particle effects */
+    unsigned int seed = static_cast<unsigned int>(time(nullptr));
+    srand(seed);
+    g_rng.seed(seed);
     DebugLog("Plugin enabled");
     return 1;
 }
@@ -1669,11 +1676,11 @@ static void UpdateWaterParticles(float dt) {
                 particle.vz *= dragFactor;
             }
             
-            /* Apply turbulence (like PSS TURBULENCE) */
+            /* Apply turbulence (like PSS TURBULENCE) - using fast mt19937 RNG */
             float turbScale = PARTICLE_TURBULENCE * dt * 60.0f; /* Scale for frame rate independence */
-            particle.vx += (static_cast<float>(rand()) / RAND_MAX - 0.5f) * turbScale;
-            particle.vy += (static_cast<float>(rand()) / RAND_MAX - 0.5f) * turbScale * 0.5f;
-            particle.vz += (static_cast<float>(rand()) / RAND_MAX - 0.5f) * turbScale;
+            particle.vx += g_randomDist(g_rng) * turbScale;
+            particle.vy += g_randomDist(g_rng) * turbScale * 0.5f;
+            particle.vz += g_randomDist(g_rng) * turbScale;
             
             /* Update position */
             particle.x += particle.vx * dt;
@@ -1756,7 +1763,7 @@ static void EmitParticle(FireTruck& truck) {
     float cannonPitchRad = truck.cannonPitch * DEG_TO_RAD;
     
     /* Initial speed for water jet (based on PSS INITIAL_SPEED ~18-25 m/s) */
-    float baseSpeed = 22.0f + (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 6.0f;
+    float baseSpeed = 22.0f + g_randomDist(g_rng) * 6.0f;
     
     /* Calculate velocity components from cannon angles
      * Pitch: 0 = horizontal, 90 = straight up
@@ -1765,9 +1772,11 @@ static void EmitParticle(FireTruck& truck) {
     float horizontalSpeed = baseSpeed * cosf(cannonPitchRad);
     float verticalSpeed = baseSpeed * sinf(cannonPitchRad);
     
-    /* Add spread like PSS INITIAL_HEADING variation (±10 degrees heading, ±5 degrees pitch) */
-    float headingSpread = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 10.0f * DEG_TO_RAD;
-    float pitchSpread = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 5.0f * DEG_TO_RAD;
+    /* Add spread like PSS INITIAL_HEADING variation (±10 degrees heading, ±5 degrees pitch)
+     * g_randomDist returns [-0.5, 0.5], so multiply by 20 for ±10 range and 10 for ±5 range
+     */
+    float headingSpread = g_randomDist(g_rng) * 20.0f * DEG_TO_RAD;
+    float pitchSpread = g_randomDist(g_rng) * 10.0f * DEG_TO_RAD;
     
     float finalHeading = cannonHeadingRad + headingSpread;
     float finalPitch = cannonPitchRad + pitchSpread;
@@ -1793,7 +1802,7 @@ static void EmitParticle(FireTruck& truck) {
     particle.vy = vy;
     particle.vz = vz;
     /* Add slight lifetime variation for more natural spray */
-    particle.lifetime = PARTICLE_LIFETIME + (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 1.0f;
+    particle.lifetime = PARTICLE_LIFETIME + g_randomDist(g_rng) * 1.0f;
     particle.maxLifetime = particle.lifetime;
     particle.active = true;
     particle.instance = nullptr;
