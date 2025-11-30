@@ -1410,10 +1410,16 @@ static void UpdateTrucks(float dt) {
         float distance = sqrtf(dx * dx + dz * dz);
         
         if (distance > 2.0f) {
-            /* Calculate desired heading to target */
+            /* Calculate desired heading to target
+             * Using X-Plane coordinate system:
+             * - heading 0° = North = (0, -1) in (X, Z)
+             * - heading 90° = East = (1, 0) in (X, Z)
+             * - For heading θ: forward = (sin(θ), -cos(θ))
+             * - To get heading from direction: θ = atan2(dirX, -dirZ)
+             */
             float dirX = dx / distance;
             float dirZ = dz / distance;
-            float desiredHeading = atan2f(-dirX, -dirZ) * RAD_TO_DEG;
+            float desiredHeading = atan2f(dirX, -dirZ) * RAD_TO_DEG;
             
             /* Calculate heading difference */
             float headingDiff = desiredHeading - truck.heading;
