@@ -47,6 +47,10 @@ static const int   NUM_PARTICLES_PER_JET = 100;    /* Number of particles per wa
 static const float PARTICLE_EMIT_RATE = 0.02f;     /* Time between particle emissions (seconds) */
 static const XPLMDrawingPhase WATER_DRAWING_PHASE = xplm_Phase_Modern3D; /* Drawing phase for water particles */
 
+/* Debug configuration */
+static const bool DEBUG_VERBOSE = true;            /* Enable verbose debug logging */
+static const float DEBUG_LOG_INTERVAL = 2.0f;      /* Interval for periodic debug logs (seconds) */
+
 /* Plugin state */
 enum PluginState {
     STATE_IDLE,
@@ -105,6 +109,9 @@ static XPLMDataRef g_drHeading = nullptr;
 static XPLMDataRef g_drWingspan = nullptr;
 
 static char g_pluginPath[512];
+static float g_debugLogTimer = 0.0f;               /* Timer for periodic debug logging */
+static int g_drawCallbackCallCount = 0;            /* Counter for draw callback calls */
+static int g_particlesEmittedTotal = 0;            /* Total particles emitted */
 
 /* Forward declarations */
 static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTimeSinceLastFlightLoop, int inCounter, void* inRefcon);
@@ -134,6 +141,54 @@ static void DebugLog(const char* format, ...) {
     char logMsg[1100];
     snprintf(logMsg, sizeof(logMsg), "WaterSalute: %s\n", buffer);
     XPLMDebugString(logMsg);
+}
+
+/* Get state name as string for debugging */
+static const char* GetStateName(PluginState state) {
+    switch (state) {
+        case STATE_IDLE: return "IDLE";
+        case STATE_TRUCKS_APPROACHING: return "TRUCKS_APPROACHING";
+        case STATE_TRUCKS_POSITIONING: return "TRUCKS_POSITIONING";
+        case STATE_WATER_SPRAYING: return "WATER_SPRAYING";
+        case STATE_TRUCKS_LEAVING: return "TRUCKS_LEAVING";
+        default: return "UNKNOWN";
+    }
+}
+
+/* Verbose debug logging (only when DEBUG_VERBOSE is enabled) */
+static void DebugLogVerbose(const char* format, ...) {
+    if (!DEBUG_VERBOSE) return;
+    
+    char buffer[1024];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    
+    char logMsg[1100];
+    snprintf(logMsg, sizeof(logMsg), "WaterSalute [VERBOSE]: %s\n", buffer);
+    XPLMDebugString(logMsg);
+}
+
+/* Log periodic debug status */
+static void LogDebugStatus() {
+    DebugLog("=== DEBUG STATUS ===");
+    DebugLog("  State: %s (%d)", GetStateName(g_state), g_state);
+    DebugLog("  Truck Object Loaded: %s", g_truckObject ? "YES" : "NO");
+    DebugLog("  Left Truck Instance: %s", g_leftTruck.instance ? "YES" : "NO");
+    DebugLog("  Right Truck Instance: %s", g_rightTruck.instance ? "YES" : "NO");
+    DebugLog("  Left Truck Position: (%.2f, %.2f, %.2f), Heading: %.1f, Positioned: %s",
+             g_leftTruck.x, g_leftTruck.y, g_leftTruck.z, g_leftTruck.heading,
+             g_leftTruck.positioned ? "YES" : "NO");
+    DebugLog("  Right Truck Position: (%.2f, %.2f, %.2f), Heading: %.1f, Positioned: %s",
+             g_rightTruck.x, g_rightTruck.y, g_rightTruck.z, g_rightTruck.heading,
+             g_rightTruck.positioned ? "YES" : "NO");
+    DebugLog("  Left Truck Particles: %zu", g_leftTruck.particles.size());
+    DebugLog("  Right Truck Particles: %zu", g_rightTruck.particles.size());
+    DebugLog("  Draw Callback Registered: %s", g_drawCallbackRegistered ? "YES" : "NO");
+    DebugLog("  Draw Callback Call Count: %d", g_drawCallbackCallCount);
+    DebugLog("  Total Particles Emitted: %d", g_particlesEmittedTotal);
+    DebugLog("===================");
 }
 
 /*
@@ -273,15 +328,30 @@ static bool LoadFireTruckModel() {
     snprintf(modelPath, sizeof(modelPath), "%s/resources/firetruck.obj", g_pluginPath);
     
     DebugLog("Loading fire truck model from: %s", modelPath);
+    DebugLog("Plugin path base: %s", g_pluginPath);
+    
+    /* Check if file exists by trying to open it */
+    FILE* testFile = fopen(modelPath, "r");
+    if (testFile) {
+        fclose(testFile);
+        DebugLog("Model file exists and is readable");
+    } else {
+        DebugLog("WARNING: Cannot open model file - errno may indicate cause");
+    }
     
     g_truckObject = XPLMLoadObject(modelPath);
     
     if (!g_truckObject) {
-        DebugLog("Failed to load fire truck model, will use default rendering");
+        DebugLog("ERROR: XPLMLoadObject returned NULL!");
+        DebugLog("  This could mean:");
+        DebugLog("  1. File path is incorrect");
+        DebugLog("  2. OBJ file format is invalid");
+        DebugLog("  3. Texture file is missing");
+        DebugLog("  4. X-Plane cannot find the resource");
         return false;
     }
     
-    DebugLog("Fire truck model loaded successfully");
+    DebugLog("Fire truck model loaded successfully (handle: %p)", (void*)g_truckObject);
     return true;
 }
 
@@ -316,18 +386,40 @@ static void UpdateMenuState() {
  * StartWaterSalute - Begin the water salute ceremony
  */
 static void StartWaterSalute() {
+    DebugLog("========================================");
     DebugLog("StartWaterSalute called");
+    DebugLog("========================================");
+    
+    /* Reset debug counters */
+    g_drawCallbackCallCount = 0;
+    g_particlesEmittedTotal = 0;
+    g_debugLogTimer = 0.0f;
     
     if (g_state != STATE_IDLE) {
-        DebugLog("Cannot start - not in idle state");
+        DebugLog("Cannot start - not in idle state (current: %s)", GetStateName(g_state));
         return;
     }
+    
+    /* Check if truck model is loaded */
+    DebugLog("Pre-flight check: Truck object loaded = %s (handle: %p)", 
+             g_truckObject ? "YES" : "NO", (void*)g_truckObject);
+    
+    /* Check datarefs availability */
+    DebugLog("Datarefs status:");
+    DebugLog("  g_drOnGround: %s", g_drOnGround ? "VALID" : "NULL");
+    DebugLog("  g_drGroundSpeed: %s", g_drGroundSpeed ? "VALID" : "NULL");
+    DebugLog("  g_drLocalX: %s", g_drLocalX ? "VALID" : "NULL");
+    DebugLog("  g_drLocalY: %s", g_drLocalY ? "VALID" : "NULL");
+    DebugLog("  g_drLocalZ: %s", g_drLocalZ ? "VALID" : "NULL");
+    DebugLog("  g_drHeading: %s", g_drHeading ? "VALID" : "NULL");
+    DebugLog("  g_drWingspan: %s", g_drWingspan ? "VALID" : "NULL");
     
     /* Check if aircraft is on ground */
     int onGround = 0;
     if (g_drOnGround) {
         onGround = XPLMGetDatai(g_drOnGround);
     }
+    DebugLog("On ground check: %d", onGround);
     
     if (!onGround) {
         DebugLog("Cannot start - aircraft not on ground");
@@ -342,6 +434,8 @@ static void StartWaterSalute() {
     }
     
     float groundSpeedKnots = groundSpeed / KNOTS_TO_MS;
+    DebugLog("Ground speed: %.2f m/s (%.1f knots)", groundSpeed, groundSpeedKnots);
+    
     if (groundSpeedKnots > MAX_GROUND_SPEED_KNOTS) {
         DebugLog("Cannot start - ground speed too high: %.1f knots", groundSpeedKnots);
         XPLMSpeakString("Water salute requires ground speed below 40 knots");
@@ -358,16 +452,22 @@ static void StartWaterSalute() {
     float wingspan = 30.0f;
     if (g_drWingspan) {
         wingspan = XPLMGetDataf(g_drWingspan);
+        DebugLog("Raw wingspan dataref value: %.2f", wingspan);
         if (wingspan <= 0.0f || wingspan > 100.0f) {
+            DebugLog("Invalid wingspan value, using default 30m");
             wingspan = 30.0f; /* Use default for invalid values */
         }
+    } else {
+        DebugLog("Wingspan dataref not found, using default 30m");
     }
     
-    DebugLog("Aircraft position: (%.2f, %.2f, %.2f), heading: %.1f, wingspan: %.1f",
-             acX, acY, acZ, acHeading, wingspan);
+    DebugLog("Aircraft position: (%.2f, %.2f, %.2f)", acX, acY, acZ);
+    DebugLog("Aircraft heading: %.1f degrees", acHeading);
+    DebugLog("Aircraft wingspan: %.1f meters", wingspan);
     
     /* Calculate truck spacing (wingspan + 40 meters) */
     float truckSpacing = (wingspan / 2.0f) + (TRUCK_EXTRA_SPACING / 2.0f);
+    DebugLog("Truck spacing from center: %.1f meters", truckSpacing);
     
     /* Convert heading to radians */
     float headingRad = acHeading * (3.14159265f / 180.0f);
@@ -375,19 +475,23 @@ static void StartWaterSalute() {
     /* Calculate forward vector (X-Plane uses -Z as forward) */
     float forwardX = -sinf(headingRad);
     float forwardZ = -cosf(headingRad);
+    DebugLog("Forward vector: (%.4f, %.4f)", forwardX, forwardZ);
     
     /* Calculate right vector */
     float rightX = cosf(headingRad);
     float rightZ = -sinf(headingRad);
+    DebugLog("Right vector: (%.4f, %.4f)", rightX, rightZ);
     
     /* Calculate truck start positions (500 meters ahead) */
     float startDistance = 500.0f;
     float startX = static_cast<float>(acX) + forwardX * startDistance;
     float startZ = static_cast<float>(acZ) + forwardZ * startDistance;
+    DebugLog("Truck start position (center): (%.2f, %.2f)", startX, startZ);
     
     /* Calculate truck target positions (200 meters ahead) */
     float targetX = static_cast<float>(acX) + forwardX * TRUCK_STOP_DISTANCE;
     float targetZ = static_cast<float>(acZ) + forwardZ * TRUCK_STOP_DISTANCE;
+    DebugLog("Truck target position (center): (%.2f, %.2f)", targetX, targetZ);
     
     /* Initialize left truck */
     InitializeTruck(g_leftTruck);
@@ -403,6 +507,11 @@ static void StartWaterSalute() {
     g_leftTruck.nozzleOffsetY = 3.5f; /* Nozzle height on truck */
     g_leftTruck.nozzleOffsetZ = 2.0f; /* Forward offset */
     
+    DebugLog("Left truck initialized:");
+    DebugLog("  Start: (%.2f, %.2f, %.2f)", g_leftTruck.x, g_leftTruck.y, g_leftTruck.z);
+    DebugLog("  Target: (%.2f, %.2f)", g_leftTruck.targetX, g_leftTruck.targetZ);
+    DebugLog("  Heading: %.1f -> %.1f", g_leftTruck.heading, g_leftTruck.targetHeading);
+    
     /* Initialize right truck */
     InitializeTruck(g_rightTruck);
     g_rightTruck.x = startX + rightX * truckSpacing;
@@ -417,17 +526,58 @@ static void StartWaterSalute() {
     g_rightTruck.nozzleOffsetY = 3.5f;
     g_rightTruck.nozzleOffsetZ = 2.0f;
     
+    DebugLog("Right truck initialized:");
+    DebugLog("  Start: (%.2f, %.2f, %.2f)", g_rightTruck.x, g_rightTruck.y, g_rightTruck.z);
+    DebugLog("  Target: (%.2f, %.2f)", g_rightTruck.targetX, g_rightTruck.targetZ);
+    DebugLog("  Heading: %.1f -> %.1f", g_rightTruck.heading, g_rightTruck.targetHeading);
+    
     /* Create truck instances if model loaded */
     if (g_truckObject) {
+        DebugLog("Creating truck instances from loaded model...");
         const char* noDataRefs[] = { nullptr };
         g_leftTruck.instance = XPLMCreateInstance(g_truckObject, noDataRefs);
         g_rightTruck.instance = XPLMCreateInstance(g_truckObject, noDataRefs);
+        DebugLog("Left truck instance: %s (handle: %p)", 
+                 g_leftTruck.instance ? "CREATED" : "FAILED", (void*)g_leftTruck.instance);
+        DebugLog("Right truck instance: %s (handle: %p)", 
+                 g_rightTruck.instance ? "CREATED" : "FAILED", (void*)g_rightTruck.instance);
+        
+        /* Set initial positions for instances */
+        if (g_leftTruck.instance) {
+            XPLMDrawInfo_t drawInfo;
+            drawInfo.structSize = sizeof(XPLMDrawInfo_t);
+            drawInfo.x = static_cast<float>(g_leftTruck.x);
+            drawInfo.y = static_cast<float>(g_leftTruck.y);
+            drawInfo.z = static_cast<float>(g_leftTruck.z);
+            drawInfo.pitch = 0.0f;
+            drawInfo.heading = g_leftTruck.heading;
+            drawInfo.roll = 0.0f;
+            XPLMInstanceSetPosition(g_leftTruck.instance, &drawInfo, nullptr);
+            DebugLog("Left truck initial position set");
+        }
+        if (g_rightTruck.instance) {
+            XPLMDrawInfo_t drawInfo;
+            drawInfo.structSize = sizeof(XPLMDrawInfo_t);
+            drawInfo.x = static_cast<float>(g_rightTruck.x);
+            drawInfo.y = static_cast<float>(g_rightTruck.y);
+            drawInfo.z = static_cast<float>(g_rightTruck.z);
+            drawInfo.pitch = 0.0f;
+            drawInfo.heading = g_rightTruck.heading;
+            drawInfo.roll = 0.0f;
+            XPLMInstanceSetPosition(g_rightTruck.instance, &drawInfo, nullptr);
+            DebugLog("Right truck initial position set");
+        }
+    } else {
+        DebugLog("WARNING: No truck model loaded - trucks will NOT be visible!");
+        DebugLog("  Check that firetruck.obj exists in the resources folder");
     }
     
     g_state = STATE_TRUCKS_APPROACHING;
     UpdateMenuState();
     
+    DebugLog("State changed to: %s", GetStateName(g_state));
     DebugLog("Water salute started - trucks approaching");
+    DebugLog("========================================");
 }
 
 /*
@@ -512,6 +662,13 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
     
     float dt = inElapsedSinceLastCall;
     if (dt > 0.1f) dt = 0.1f; /* Clamp large time steps */
+    
+    /* Periodic debug logging */
+    g_debugLogTimer += dt;
+    if (g_debugLogTimer >= DEBUG_LOG_INTERVAL) {
+        g_debugLogTimer = 0.0f;
+        LogDebugStatus();
+    }
     
     UpdateTrucks(dt);
     
@@ -632,16 +789,26 @@ static void UpdateTrucks(float dt) {
             updateTruckPosition(g_rightTruck, allPositioned);
             
             if (g_leftTruck.positioned && g_rightTruck.positioned) {
+                DebugLog("========================================");
+                DebugLog("STATE TRANSITION: %s -> WATER_SPRAYING", GetStateName(g_state));
+                DebugLog("Both trucks are now positioned");
+                DebugLog("Left truck final pos: (%.2f, %.2f, %.2f), heading: %.1f",
+                         g_leftTruck.x, g_leftTruck.y, g_leftTruck.z, g_leftTruck.heading);
+                DebugLog("Right truck final pos: (%.2f, %.2f, %.2f), heading: %.1f",
+                         g_rightTruck.x, g_rightTruck.y, g_rightTruck.z, g_rightTruck.heading);
                 g_state = STATE_WATER_SPRAYING;
                 RegisterDrawCallback();
                 UpdateMenuState();
-                DebugLog("Trucks positioned, starting water spray");
+                DebugLog("Draw callback registered, water spray starting");
+                DebugLog("========================================");
             } else if (g_state == STATE_TRUCKS_APPROACHING) {
                 /* Check if close enough to start positioning */
                 float dx = g_leftTruck.targetX - static_cast<float>(g_leftTruck.x);
                 float dz = g_leftTruck.targetZ - static_cast<float>(g_leftTruck.z);
                 float dist = sqrtf(dx * dx + dz * dz);
                 if (dist < 50.0f) {
+                    DebugLog("STATE TRANSITION: TRUCKS_APPROACHING -> TRUCKS_POSITIONING");
+                    DebugLog("Trucks are within 50m of target, beginning positioning phase");
                     g_state = STATE_TRUCKS_POSITIONING;
                 }
             }
@@ -657,12 +824,13 @@ static void UpdateTrucks(float dt) {
             g_rightTruck.particles.clear();
             
             if (leftGone && rightGone) {
+                DebugLog("STATE TRANSITION: TRUCKS_LEAVING -> IDLE");
                 CleanupTruck(g_leftTruck);
                 CleanupTruck(g_rightTruck);
                 UnregisterDrawCallback();
                 g_state = STATE_IDLE;
                 UpdateMenuState();
-                DebugLog("Water salute complete");
+                DebugLog("Water salute complete - all trucks departed");
             }
             break;
         }
@@ -728,6 +896,7 @@ static void UpdateWaterParticles(float dt) {
  */
 static void EmitParticle(FireTruck& truck) {
     if (truck.particles.size() >= static_cast<size_t>(NUM_PARTICLES_PER_JET)) {
+        DebugLogVerbose("Particle limit reached for truck (%zu/%d)", truck.particles.size(), NUM_PARTICLES_PER_JET);
         return;
     }
     
@@ -775,6 +944,16 @@ static void EmitParticle(FireTruck& truck) {
     particle.active = true;
     
     truck.particles.push_back(particle);
+    g_particlesEmittedTotal++;
+    
+    /* Log first particle emission for debugging */
+    if (g_particlesEmittedTotal == 1) {
+        DebugLog("First particle emitted:");
+        DebugLog("  Nozzle pos: (%.2f, %.2f, %.2f)", nozzleX, nozzleY, nozzleZ);
+        DebugLog("  Target center: (%.2f, %.2f, %.2f)", centerX, centerY, centerZ);
+        DebugLog("  Velocity: (%.2f, %.2f, %.2f)", vx, vy, vz);
+        DebugLog("  Distance to center: %.2f", dist);
+    }
 }
 
 /*
@@ -782,9 +961,13 @@ static void EmitParticle(FireTruck& truck) {
  */
 static void RegisterDrawCallback() {
     if (!g_drawCallbackRegistered) {
-        XPLMRegisterDrawCallback(DrawWaterParticles, WATER_DRAWING_PHASE, 0, nullptr);
+        int result = XPLMRegisterDrawCallback(DrawWaterParticles, WATER_DRAWING_PHASE, 0, nullptr);
         g_drawCallbackRegistered = true;
-        DebugLog("Draw callback registered");
+        g_drawCallbackCallCount = 0; /* Reset counter */
+        DebugLog("Draw callback registered (result=%d)", result);
+        DebugLog("  Drawing phase: xplm_Phase_Modern3D (%d)", WATER_DRAWING_PHASE);
+        DebugLog("  NOTE: Callback will be invoked but water particles won't be visible");
+        DebugLog("  because the DrawWaterParticles function lacks OpenGL rendering code.");
     }
 }
 
@@ -796,47 +979,93 @@ static void UnregisterDrawCallback() {
         XPLMUnregisterDrawCallback(DrawWaterParticles, WATER_DRAWING_PHASE, 0, nullptr);
         g_drawCallbackRegistered = false;
         DebugLog("Draw callback unregistered");
+        DebugLog("Final draw callback call count: %d", g_drawCallbackCallCount);
     }
 }
 
 /* 
  * Draw callback for rendering water particles
+ * 
+ * IMPORTANT DEBUG NOTE: This function is called but does NOT actually render 
+ * any visible particles. The particle data is computed but no OpenGL drawing
+ * commands are executed. This is a known limitation.
+ * 
+ * To implement visible water effects, one of the following approaches is needed:
+ * 1. Use OpenGL immediate mode or VBOs to draw billboarded quads
+ * 2. Use X-Plane's particle system (if available in SDK version)
+ * 3. Use instanced OBJ rendering for water droplet models
  */
 static int DrawWaterParticles(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon) {
     (void)inPhase;
     (void)inIsBefore;
     (void)inRefcon;
     
+    g_drawCallbackCallCount++;
+    
+    /* Log first callback and then periodically */
+    if (g_drawCallbackCallCount == 1) {
+        DebugLog("DrawWaterParticles callback first invocation");
+        DebugLog("  Phase: %d, IsBefore: %d", inPhase, inIsBefore);
+    }
+    
     if (g_state != STATE_WATER_SPRAYING) {
+        if (g_drawCallbackCallCount <= 5) {
+            DebugLog("DrawWaterParticles: State is not WATER_SPRAYING (state=%s)", GetStateName(g_state));
+        }
         return 1;
     }
     
     /* Set up graphics state for particle rendering */
     XPLMSetGraphicsState(0, 0, 0, 0, 1, 1, 0);
     
-    /* Draw particles as points/billboards */
-    /* Note: In a real implementation, this would use OpenGL to render particles
-     * as textured billboards with proper alpha blending */
+    /* Count active particles for debugging */
+    int leftActiveCount = 0;
+    int rightActiveCount = 0;
     
-    auto drawTruckParticles = [](const FireTruck& truck) {
+    /* Draw particles as points/billboards */
+    /* 
+     * =====================================================================
+     * WARNING: NO ACTUAL RENDERING IS HAPPENING HERE!
+     * =====================================================================
+     * The code below iterates through particles but does NOT draw anything.
+     * This is why no water effect is visible.
+     * 
+     * To fix this, OpenGL drawing commands need to be added, such as:
+     * - glBegin(GL_POINTS) / glVertex3f() / glEnd() for point particles
+     * - Or textured quads for billboarded water droplets
+     * - Or use XPLMDrawString for debug visualization
+     * =====================================================================
+     */
+    
+    auto drawTruckParticles = [](const FireTruck& truck, int& activeCount) {
         for (const auto& particle : truck.particles) {
             if (!particle.active) continue;
+            activeCount++;
             
             /* Calculate alpha based on lifetime */
             float alpha = particle.lifetime / particle.maxLifetime;
             
-            /* In real implementation:
-             * - Bind water droplet texture
-             * - Draw billboard quad at particle.x, particle.y, particle.z
-             * - Apply alpha fading
-             * - Use blue/cyan color
+            /* 
+             * PLACEHOLDER: No actual drawing is performed here!
+             * This is where OpenGL calls should go to render the particles.
+             * Currently the particles exist in memory but are not visualized.
              */
             (void)alpha;
+            (void)particle; /* Silence unused variable warning */
         }
     };
     
-    drawTruckParticles(g_leftTruck);
-    drawTruckParticles(g_rightTruck);
+    drawTruckParticles(g_leftTruck, leftActiveCount);
+    drawTruckParticles(g_rightTruck, rightActiveCount);
+    
+    /* Periodic logging of particle counts during drawing */
+    if (g_drawCallbackCallCount % 100 == 0) {
+        DebugLog("DrawWaterParticles stats (call #%d):", g_drawCallbackCallCount);
+        DebugLog("  Left truck active particles: %d", leftActiveCount);
+        DebugLog("  Right truck active particles: %d", rightActiveCount);
+        DebugLog("  WARNING: Particles are being tracked but NOT rendered!");
+        DebugLog("  The DrawWaterParticles function needs OpenGL drawing code.");
+    }
     
     return 1;
 }
