@@ -53,6 +53,13 @@ static const int   NUM_PARTICLES_PER_JET = 100;    /* Number of particles per wa
 static const float PARTICLE_EMIT_RATE = 0.02f;     /* Time between particle emissions (seconds) */
 static const XPLMDrawingPhase WATER_DRAWING_PHASE = xplm_Phase_Modern3D; /* Drawing phase for water particles */
 
+/* Wingspan validation constants */
+static const float MIN_SEMISPAN_METERS = 2.5f;     /* Minimum semispan (half wingspan) in meters (small aircraft ~5m wingspan) */
+static const float MAX_SEMISPAN_METERS = 45.0f;    /* Maximum semispan in meters (A380 wingspan ~80m / 2) */
+static const float MIN_WINGSPAN_METERS = 5.0f;     /* Minimum valid wingspan in meters */
+static const float MAX_WINGSPAN_METERS = 90.0f;    /* Maximum valid wingspan in meters (A380 ~80m) */
+static const float DEFAULT_WINGSPAN_METERS = 30.0f; /* Default wingspan if not available */
+
 /* Debug configuration */
 #ifndef WATERSALUTE_DEBUG_VERBOSE
 static const bool DEBUG_VERBOSE = false;           /* Enable verbose debug logging (set to true for debugging) */
@@ -712,14 +719,25 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     g_drHeading = XPLMFindDataRef("sim/flightmodel/position/psi");
     
     /* Find wingspan dataref - try several possible datarefs
-     * X-Plane 12 stores wing span in:
-     * - sim/aircraft/overflow/acf_span: wing span in feet (most reliable)
+     * 
+     * Based on analysis of BetterPushback project (olivierbutler/BetterPusbackMod):
+     * - BetterPushback reads wing geometry directly from ACF file properties:
+     *   - _wing/%d/_semilen_SEG (wing segment semi-length in feet)
+     *   - acf/_size_x (half wingspan/semispan in feet, older XP versions)
+     *   - Or calculates from wing outline point coordinates
+     * 
+     * For simpler dataref-based approach, we try:
+     * - sim/aircraft/view/acf_semi_len_m: aircraft half-width (semispan) in meters
+     * - sim/aircraft/overflow/acf_span: wingspan in feet (if available)
      * 
      * Note: sim/aircraft/view/acf_Vso is stall speed in knots, NOT wingspan!
      * 
      * Try multiple possible datarefs for compatibility with different X-Plane versions.
      */
-    g_drWingspan = XPLMFindDataRef("sim/aircraft/overflow/acf_span");  /* Wingspan in feet (primary) */
+    g_drWingspan = XPLMFindDataRef("sim/aircraft/view/acf_semi_len_m");  /* Semispan in meters (XP12 primary) */
+    if (!g_drWingspan) {
+        g_drWingspan = XPLMFindDataRef("sim/aircraft/overflow/acf_span");  /* Wingspan in feet (fallback) */
+    }
     if (!g_drWingspan) {
         g_drWingspan = XPLMFindDataRef("sim/aircraft/parts/acf_wing_span");
     }
@@ -1084,38 +1102,50 @@ static void StartWaterSalute() {
     float acHeading = g_drHeading ? XPLMGetDataf(g_drHeading) : 0.0f;
     
     /* Get aircraft wingspan 
-     * Dataref units by source:
-     * - sim/aircraft/overflow/acf_span: wingspan in FEET (primary, most reliable)
+     * Based on analysis of BetterPushback project (olivierbutler/BetterPusbackMod):
+     * - BetterPushback reads wing geometry directly from ACF file, calculating
+     *   semispan from wing segment properties or acf/_size_x (in feet)
+     * 
+     * Dataref units by source (priority order):
+     * - sim/aircraft/view/acf_semi_len_m: semispan (half-width) in METERS
+     *   -> Need to multiply by 2 to get full wingspan
+     * - sim/aircraft/overflow/acf_span: wingspan in FEET
+     *   -> Need FEET_TO_METERS conversion
      * - sim/aircraft/parts/acf_wing_span: if exists, may return meters
      * - sim/aircraft/view/acf_wing_span: if exists, may return meters
      * 
-     * Strategy: Try feet->meters conversion first, then check if raw value
-     * is a reasonable wingspan in meters as a fallback for legacy/custom datarefs.
+     * Strategy: Detect which dataref we found and apply appropriate conversion.
      * Default to 30 meters if not available or value is unreasonable.
      */
-    float wingspan = 30.0f;  /* Default wingspan in meters */
+    float wingspan = DEFAULT_WINGSPAN_METERS;  /* Default wingspan in meters */
     if (g_drWingspan) {
         float rawValue = XPLMGetDataf(g_drWingspan);
         DebugLog("Raw wingspan dataref value: %.2f", rawValue);
         
-        /* Primary case: acf_span returns feet, convert to meters */
-        float wingspanMeters = rawValue * FEET_TO_METERS;
-        DebugLog("Wingspan after feet->meters conversion: %.2f m", wingspanMeters);
-        
-        /* Sanity check: wingspan should be between 5m (small plane) and 90m (A380) */
-        if (wingspanMeters >= 5.0f && wingspanMeters <= 90.0f) {
-            wingspan = wingspanMeters;
-        } else if (rawValue >= 5.0f && rawValue <= 90.0f) {
-            /* Fallback: If converted value is unreasonable, raw value might already be in meters.
-             * This handles legacy datarefs or custom aircraft that report meters directly.
-             */
-            DebugLog("Converted value unreasonable, using raw value as meters (fallback)");
-            wingspan = rawValue;
+        /* Check if we're using acf_semi_len_m (semispan in meters) */
+        if (rawValue >= MIN_SEMISPAN_METERS && rawValue <= MAX_SEMISPAN_METERS) {
+            /* Likely acf_semi_len_m (semispan in meters), multiply by 2 for full wingspan */
+            wingspan = rawValue * 2.0f;
+            DebugLog("Interpreted as semispan in meters, wingspan: %.2f m", wingspan);
         } else {
-            DebugLog("Invalid wingspan value (%.2f ft / %.2f m), using default 30m", rawValue, wingspanMeters);
+            /* Try feet->meters conversion (acf_span returns full wingspan in feet) */
+            float wingspanMeters = rawValue * FEET_TO_METERS;
+            DebugLog("Wingspan after feet->meters conversion: %.2f m", wingspanMeters);
+            
+            /* Sanity check: wingspan should be within valid range */
+            if (wingspanMeters >= MIN_WINGSPAN_METERS && wingspanMeters <= MAX_WINGSPAN_METERS) {
+                wingspan = wingspanMeters;
+            } else if (rawValue >= MIN_WINGSPAN_METERS && rawValue <= MAX_WINGSPAN_METERS) {
+                /* Fallback: If converted value is unreasonable, raw value might already be full wingspan in meters */
+                DebugLog("Converted value unreasonable, using raw value as meters (fallback)");
+                wingspan = rawValue;
+            } else {
+                DebugLog("Invalid wingspan value (%.2f ft / %.2f m), using default %.0fm", 
+                         rawValue, wingspanMeters, DEFAULT_WINGSPAN_METERS);
+            }
         }
     } else {
-        DebugLog("Wingspan dataref not found, using default 30m");
+        DebugLog("Wingspan dataref not found, using default %.0fm", DEFAULT_WINGSPAN_METERS);
     }
     
     DebugLog("Aircraft position: (%.2f, %.2f, %.2f)", acX, acY, acZ);
