@@ -143,6 +143,33 @@ static const float DEFAULT_CANNON_PITCH = 45.0f;        /* Default cannon pitch 
 static const float PI = 3.14159265f;                    /* Pi constant */
 static const float DEG_TO_RAD = PI / 180.0f;            /* Degrees to radians conversion */
 static const float RAD_TO_DEG = 180.0f / PI;            /* Radians to degrees conversion */
+static const float REAR_STEER_RATIO = 0.4f;             /* Ratio for rear axle counter-steering */
+
+/*
+ * NormalizeAngle360 - Normalize angle to 0-360° range
+ */
+static float NormalizeAngle360(float angle) {
+    while (angle >= 360.0f) {
+        angle -= 360.0f;
+    }
+    while (angle < 0.0f) {
+        angle += 360.0f;
+    }
+    return angle;
+}
+
+/*
+ * UpdateWheelRotationAngle - Calculate and update wheel rotation angle based on distance moved
+ * @param truck Reference to the truck to update
+ * @param distanceMoved Distance moved in meters
+ */
+static void UpdateWheelRotationAngle(FireTruck& truck, float distanceMoved) {
+    if (distanceMoved > 0.0f) {
+        float angularDisplacementRad = distanceMoved / WHEEL_RADIUS;
+        float angularDisplacementDeg = angularDisplacementRad * RAD_TO_DEG;
+        truck.wheelRotationAngle = NormalizeAngle360(truck.wheelRotationAngle + angularDisplacementDeg);
+    }
+}
 
 static char g_pluginPath[512];
 static char g_resourcePath[512];  /* Path to resources directory */
@@ -1226,21 +1253,8 @@ static void UpdateTrucks(float dt) {
             float actualDistance = sqrtf(actualDx * actualDx + actualDz * actualDz);
             truck.speed = (dt > 0.0f) ? (actualDistance / dt) : 0.0f;
             
-            /* Calculate wheel rotation angle from vehicle speed (0-360°) */
-            /* Angular displacement = distance / wheel_radius (in radians) */
-            /* Convert to degrees and accumulate, wrapping at 360° */
-            if (truck.speed > 0.0f && dt > 0.0f) {
-                float angularDisplacementRad = actualDistance / WHEEL_RADIUS;
-                float angularDisplacementDeg = angularDisplacementRad * RAD_TO_DEG;
-                truck.wheelRotationAngle += angularDisplacementDeg;
-                /* Normalize to 0-360° range */
-                while (truck.wheelRotationAngle >= 360.0f) {
-                    truck.wheelRotationAngle -= 360.0f;
-                }
-                while (truck.wheelRotationAngle < 0.0f) {
-                    truck.wheelRotationAngle += 360.0f;
-                }
-            }
+            /* Update wheel rotation angle based on distance moved */
+            UpdateWheelRotationAngle(truck, actualDistance);
             
             /* Calculate desired heading */
             float desiredHeading = atan2f(-dirX, -dirZ) * RAD_TO_DEG;
@@ -1271,8 +1285,6 @@ static void UpdateTrucks(float dt) {
             if (truck.frontSteeringAngle < -MAX_STEERING_ANGLE) truck.frontSteeringAngle = -MAX_STEERING_ANGLE;
             
             /* Rear axle steering angle (opposite direction for counter-steering) */
-            /* Use a smaller ratio (typically 0.3-0.5) for rear axle counter-steering */
-            const float REAR_STEER_RATIO = 0.4f;
             truck.rearSteeringAngle = -headingDiff * REAR_STEER_RATIO;
             if (truck.rearSteeringAngle > MAX_STEERING_ANGLE) truck.rearSteeringAngle = MAX_STEERING_ANGLE;
             if (truck.rearSteeringAngle < -MAX_STEERING_ANGLE) truck.rearSteeringAngle = -MAX_STEERING_ANGLE;
@@ -1338,7 +1350,7 @@ static void UpdateTrucks(float dt) {
         /* Front axles: positive steering for right turn */
         truck.frontSteeringAngle = MAX_STEERING_ANGLE;
         /* Rear axle: negative steering for counter-steer during right turn */
-        truck.rearSteeringAngle = -MAX_STEERING_ANGLE * 0.4f;
+        truck.rearSteeringAngle = -MAX_STEERING_ANGLE * REAR_STEER_RATIO;
         
         /* Then move forward */
         float moveSpeed = TRUCK_APPROACH_SPEED * 2.0f;
@@ -1346,16 +1358,7 @@ static void UpdateTrucks(float dt) {
         truck.speed = moveSpeed;
         
         /* Update wheel rotation angle based on distance moved */
-        float angularDisplacementRad = moveDistance / WHEEL_RADIUS;
-        float angularDisplacementDeg = angularDisplacementRad * RAD_TO_DEG;
-        truck.wheelRotationAngle += angularDisplacementDeg;
-        /* Normalize to 0-360° range */
-        while (truck.wheelRotationAngle >= 360.0f) {
-            truck.wheelRotationAngle -= 360.0f;
-        }
-        while (truck.wheelRotationAngle < 0.0f) {
-            truck.wheelRotationAngle += 360.0f;
-        }
+        UpdateWheelRotationAngle(truck, moveDistance);
         
         truck.x += dirX * moveDistance;
         truck.z += dirZ * moveDistance;
