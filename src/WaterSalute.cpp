@@ -47,10 +47,12 @@ static const float TRUCK_STOP_DISTANCE = 200.0f;   /* Distance in front of aircr
 static const float TRUCK_EXTRA_SPACING = 40.0f;    /* Extra spacing beyond wingspan (meters) */
 static const float TRUCK_POSITIONING_THRESHOLD = 50.0f; /* Distance threshold to start positioning phase (meters) */
 static const float WATER_JET_HEIGHT = 25.0f;       /* Maximum height of water arch (meters) */
-static const float WATER_JET_DURATION = 0.5f;      /* Time for particle to reach apex */
-static const float PARTICLE_LIFETIME = 2.0f;       /* Particle lifetime in seconds */
-static const int   NUM_PARTICLES_PER_JET = 100;    /* Number of particles per water jet */
-static const float PARTICLE_EMIT_RATE = 0.02f;     /* Time between particle emissions (seconds) */
+static const float WATER_JET_DURATION = 0.8f;      /* Time for particle to reach apex */
+static const float PARTICLE_LIFETIME = 4.0f;       /* Particle lifetime in seconds (longer for water spray effect) */
+static const int   NUM_PARTICLES_PER_JET = 200;    /* Number of particles per water jet (more for denser spray) */
+static const float PARTICLE_EMIT_RATE = 0.015f;    /* Time between particle emissions (faster for continuous stream) */
+static const float PARTICLE_DRAG = 0.15f;          /* Air drag coefficient for particles */
+static const float PARTICLE_TURBULENCE = 0.02f;    /* Turbulence amount for particle movement */
 static const XPLMDrawingPhase WATER_DRAWING_PHASE = xplm_Phase_Modern3D; /* Drawing phase for water particles */
 
 /* Wingspan validation constants */
@@ -1654,6 +1656,22 @@ static void UpdateWaterParticles(float dt) {
             /* Apply gravity */
             particle.vy -= 9.8f * dt;
             
+            /* Apply air drag (like PSS DRAG_CURVE) */
+            float speed = sqrtf(particle.vx * particle.vx + particle.vy * particle.vy + particle.vz * particle.vz);
+            if (speed > 0.01f) {
+                float dragFactor = 1.0f - PARTICLE_DRAG * dt;
+                if (dragFactor < 0.0f) dragFactor = 0.0f;
+                particle.vx *= dragFactor;
+                particle.vy *= dragFactor;
+                particle.vz *= dragFactor;
+            }
+            
+            /* Apply turbulence (like PSS TURBULENCE) */
+            float turbScale = PARTICLE_TURBULENCE * dt * 60.0f; /* Scale for frame rate independence */
+            particle.vx += (static_cast<float>(rand()) / RAND_MAX - 0.5f) * turbScale;
+            particle.vy += (static_cast<float>(rand()) / RAND_MAX - 0.5f) * turbScale * 0.5f;
+            particle.vz += (static_cast<float>(rand()) / RAND_MAX - 0.5f) * turbScale;
+            
             /* Update position */
             particle.x += particle.vx * dt;
             particle.y += particle.vy * dt;
@@ -1727,27 +1745,41 @@ static void EmitParticle(FireTruck& truck) {
     float nozzleY = static_cast<float>(truck.y) + truck.nozzleOffsetY;
     float nozzleZ = static_cast<float>(truck.z) + truck.nozzleOffsetX * sinH + truck.nozzleOffsetZ * (-cosH);
     
-    /* Calculate target point (center between trucks, at height) */
-    float centerX = (static_cast<float>(g_leftTruck.x) + static_cast<float>(g_rightTruck.x)) / 2.0f;
-    float centerZ = (static_cast<float>(g_leftTruck.z) + static_cast<float>(g_rightTruck.z)) / 2.0f;
-    float centerY = static_cast<float>(truck.y) + WATER_JET_HEIGHT;
+    /* Calculate water jet direction based on cannon pitch and yaw
+     * The cannon aims based on truck heading + cannonYaw for horizontal direction
+     * and cannonPitch for vertical angle
+     */
+    float cannonHeadingRad = (truck.heading + truck.cannonYaw) * DEG_TO_RAD;
+    float cannonPitchRad = truck.cannonPitch * DEG_TO_RAD;
     
-    /* Calculate direction to center/top of arc */
-    float dx = centerX - nozzleX;
-    float dz = centerZ - nozzleZ;
-    float dist = sqrtf(dx * dx + dz * dz);
+    /* Initial speed for water jet (based on PSS INITIAL_SPEED ~18-25 m/s) */
+    float baseSpeed = 22.0f + (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 6.0f;
     
-    /* Calculate initial velocity for parabolic arc */
-    float t = WATER_JET_DURATION;
-    float vx = dx / (2.0f * t);
-    float vz = dz / (2.0f * t);
-    float vy = (centerY - nozzleY + 0.5f * 9.8f * t * t) / t;
+    /* Calculate velocity components from cannon angles
+     * Pitch: 0 = horizontal, 90 = straight up
+     * Heading: direction in horizontal plane
+     */
+    float horizontalSpeed = baseSpeed * cosf(cannonPitchRad);
+    float verticalSpeed = baseSpeed * sinf(cannonPitchRad);
     
-    /* Add some randomness */
-    float randScale = 0.1f;
-    vx += (static_cast<float>(rand()) / RAND_MAX - 0.5f) * randScale * dist;
-    vz += (static_cast<float>(rand()) / RAND_MAX - 0.5f) * randScale * dist;
-    vy += (static_cast<float>(rand()) / RAND_MAX - 0.5f) * randScale * 5.0f;
+    /* Add spread like PSS INITIAL_HEADING variation (±5 degrees) */
+    float headingSpread = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 10.0f * DEG_TO_RAD;
+    float pitchSpread = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 5.0f * DEG_TO_RAD;
+    
+    float finalHeading = cannonHeadingRad + headingSpread;
+    float finalPitch = cannonPitchRad + pitchSpread;
+    
+    /* Recalculate velocity with spread */
+    horizontalSpeed = baseSpeed * cosf(finalPitch);
+    verticalSpeed = baseSpeed * sinf(finalPitch);
+    
+    /* Convert to X-Plane coordinate system
+     * Heading 0 = North = -Z direction
+     * Heading 90 = East = +X direction
+     */
+    float vx = horizontalSpeed * sinf(finalHeading);
+    float vz = -horizontalSpeed * cosf(finalHeading);
+    float vy = verticalSpeed;
     
     /* Create particle */
     WaterParticle particle;
@@ -1757,8 +1789,9 @@ static void EmitParticle(FireTruck& truck) {
     particle.vx = vx;
     particle.vy = vy;
     particle.vz = vz;
-    particle.lifetime = PARTICLE_LIFETIME;
-    particle.maxLifetime = PARTICLE_LIFETIME;
+    /* Add slight lifetime variation for more natural spray */
+    particle.lifetime = PARTICLE_LIFETIME + (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 1.0f;
+    particle.maxLifetime = particle.lifetime;
     particle.active = true;
     particle.instance = nullptr;
     
@@ -1795,9 +1828,9 @@ static void EmitParticle(FireTruck& truck) {
     if (g_particlesEmittedTotal == 1) {
         DebugLog("First particle emitted:");
         DebugLog("  Nozzle pos: (%.2f, %.2f, %.2f)", nozzleX, nozzleY, nozzleZ);
-        DebugLog("  Target center: (%.2f, %.2f, %.2f)", centerX, centerY, centerZ);
+        DebugLog("  Cannon angles: pitch=%.1f yaw=%.1f", truck.cannonPitch, truck.cannonYaw);
         DebugLog("  Velocity: (%.2f, %.2f, %.2f)", vx, vy, vz);
-        DebugLog("  Distance to center: %.2f", dist);
+        DebugLog("  Speed: %.2f m/s", baseSpeed);
     }
 }
 
