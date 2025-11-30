@@ -14,7 +14,8 @@ TEXTURE water.png
 # Two crossed quads = 8 vertices, 12 indices (4 triangles)
 POINT_COUNTS 8 0 0 12
 
-# First quad - aligned with X axis (YZ plane)
+# First quad - lies in z=0 plane (XY plane)
+# Normal points in Z direction since the quad face is perpendicular to Z axis
 # UV coordinates map to water spray cell in the 8x8 sprite sheet
 # Using cell (0,0) to (1,1) in the first row: UV 0.0-0.125, 0.875-1.0
 VT -0.75  0.75  0.0   0.0  0.0  1.0   0.0    0.875
@@ -22,7 +23,8 @@ VT  0.75  0.75  0.0   0.0  0.0  1.0   0.125  0.875
 VT  0.75 -0.75  0.0   0.0  0.0  1.0   0.125  1.0
 VT -0.75 -0.75  0.0   0.0  0.0  1.0   0.0    1.0
 
-# Second quad - rotated 90 degrees (XY plane), perpendicular to first
+# Second quad - rotated 90 degrees, lies in x=0 plane (YZ plane)
+# Normal points in X direction since the quad face is perpendicular to X axis
 VT  0.0   0.75 -0.75   1.0  0.0  0.0   0.0    0.875
 VT  0.0   0.75  0.75   1.0  0.0  0.0   0.125  0.875
 VT  0.0  -0.75  0.75   1.0  0.0  0.0   0.125  1.0
