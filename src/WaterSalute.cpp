@@ -1084,16 +1084,21 @@ static void StartWaterSalute() {
     float acHeading = g_drHeading ? XPLMGetDataf(g_drHeading) : 0.0f;
     
     /* Get aircraft wingspan 
-     * Primary dataref: sim/aircraft/overflow/acf_span returns wingspan in FEET
-     * Fallback datarefs may return meters directly
-     * Default to 30 meters if not available or value is unreasonable
+     * Dataref units by source:
+     * - sim/aircraft/overflow/acf_span: wingspan in FEET (primary, most reliable)
+     * - sim/aircraft/parts/acf_wing_span: if exists, may return meters
+     * - sim/aircraft/view/acf_wing_span: if exists, may return meters
+     * 
+     * Strategy: Try feet->meters conversion first, then check if raw value
+     * is a reasonable wingspan in meters as a fallback for legacy/custom datarefs.
+     * Default to 30 meters if not available or value is unreasonable.
      */
     float wingspan = 30.0f;  /* Default wingspan in meters */
     if (g_drWingspan) {
         float rawValue = XPLMGetDataf(g_drWingspan);
         DebugLog("Raw wingspan dataref value: %.2f", rawValue);
         
-        /* acf_span returns feet, convert to meters */
+        /* Primary case: acf_span returns feet, convert to meters */
         float wingspanMeters = rawValue * FEET_TO_METERS;
         DebugLog("Wingspan after feet->meters conversion: %.2f m", wingspanMeters);
         
@@ -1101,8 +1106,10 @@ static void StartWaterSalute() {
         if (wingspanMeters >= 5.0f && wingspanMeters <= 90.0f) {
             wingspan = wingspanMeters;
         } else if (rawValue >= 5.0f && rawValue <= 90.0f) {
-            /* If the converted value is unreasonable, maybe it was already in meters */
-            DebugLog("Converted value unreasonable, trying raw value as meters");
+            /* Fallback: If converted value is unreasonable, raw value might already be in meters.
+             * This handles legacy datarefs or custom aircraft that report meters directly.
+             */
+            DebugLog("Converted value unreasonable, using raw value as meters (fallback)");
             wingspan = rawValue;
         } else {
             DebugLog("Invalid wingspan value (%.2f ft / %.2f m), using default 30m", rawValue, wingspanMeters);
