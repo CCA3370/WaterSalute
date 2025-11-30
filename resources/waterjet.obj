@@ -1,0 +1,15 @@
+I
+800
+OBJ
+
+# Water Jet particle emitter for Water Salute Plugin
+# This OBJ file contains only a particle system emitter - no geometry
+# The emitter shoots water particles at an angle to create an arcing water jet
+
+PARTICLE_SYSTEM	waterjet.pss
+ATTR_LOD 5000
+
+# Emitter placement: name, direction vector (x, y, z), position offset (x, y, z)
+# Direction: (0, 1, 0) = upward, but the PSS INITIAL_PITCH controls the actual angle
+# Position: at origin, will be positioned via instance transform
+EMITTER waterjet 0 1 0 0 0 0
