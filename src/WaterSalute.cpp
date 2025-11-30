@@ -30,6 +30,7 @@
 #include "XPLMMenus.h"
 #include "XPLMUtilities.h"
 #include "XPLMGraphics.h"
+#include "XPLMDisplay.h"
 #include "XPLMScenery.h"
 #include "XPLMInstance.h"
 
@@ -143,8 +144,12 @@ XPLM_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     strcpy(outSig, "com.xplane.watersalute");
     strcpy(outDesc, "Water salute ceremony with fire trucks");
     
-    /* Get plugin path */
-    XPLMGetPluginDirectoryPath(g_pluginPath);
+    /* Get plugin path using XPLMGetPluginInfo */
+    XPLMGetPluginInfo(XPLMGetMyID(), nullptr, g_pluginPath, nullptr, nullptr);
+    /* Extract directory path from full file path */
+    char* lastSlash = strrchr(g_pluginPath, '/');
+    if (!lastSlash) lastSlash = strrchr(g_pluginPath, '\\');
+    if (lastSlash) *lastSlash = '\0';
     
     DebugLog("Plugin starting...");
     

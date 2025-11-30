@@ -12,11 +12,6 @@ set(SOURCES
     src/WaterSalute.cpp
 )
 
-# Add Windows stub file for linking
-if(WIN32)
-    list(APPEND SOURCES src/XPLMStubs.cpp)
-endif()
-
 # Platform detection
 if(WIN32)
     set(XPLM_PLATFORM "Windows")
@@ -50,6 +45,8 @@ target_compile_definitions(WaterSalute PRIVATE
     XPLM210=1
     XPLM300=1
     XPLM301=1
+    XPLM302=1
+    XPLM303=1
     XPLM400=1
     XPLM410=1
     XPLM420=1
@@ -65,10 +62,10 @@ if(WIN32)
     target_link_options(WaterSalute PRIVATE
         /DEF:${CMAKE_SOURCE_DIR}/src/WaterSalute.def
     )
-    # Link against XPLM library (when available)
-    # target_link_libraries(WaterSalute PRIVATE
-    #     ${XPLM_SDK_PATH}/Libraries/Win/XPLM_64.lib
-    # )
+    # Link against XPLM library
+    target_link_libraries(WaterSalute PRIVATE
+        ${XPLM_SDK_PATH}/Libraries/Win/XPLM_64.lib
+    )
 elseif(APPLE)
     target_compile_options(WaterSalute PRIVATE
         -fvisibility=hidden

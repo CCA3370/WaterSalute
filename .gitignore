@@ -17,7 +17,6 @@
 *.pdb
 
 # Compiled Dynamic libraries
-*.so
 *.dylib
 *.dll
 *.xpl
@@ -30,7 +29,6 @@
 *.lai
 *.la
 *.a
-*.lib
 
 # Executables
 *.exe
